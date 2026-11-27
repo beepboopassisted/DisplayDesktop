@@ -41,7 +41,7 @@ class Base(unittest.TestCase):
 class Format(Base):
     def test_plain_while_off(self):
         paths.write_json(self.path(LAYOUT_FILE), {"Windows": []})
-        self.assertEqual(self.raw(LAYOUT_FILE), b'{"Windows":[],"Format":1}')
+        self.assertEqual(self.raw(LAYOUT_FILE), b'{"Windows":[],"Format":2}')
 
     def test_encrypted_with_the_marker_and_read_back_with_the_key(self):
         self.assertEqual(REAL_ITERATIONS, 200_000, "part of the file format: files written before must open")
@@ -145,9 +145,13 @@ class FileFormat(Base):
         self.assertEqual(paths.read_json(self.path(SETTINGS_FILE)), {"StartMenu": True}, "not in what is read")
 
     def test_a_file_without_the_number_reads_as_format_1(self):
+        with open(self.path(SETTINGS_FILE), "w", encoding="utf-8") as fh:
+            fh.write('{"StartMenu":true}')
         with open(self.path(LAYOUT_FILE), "w", encoding="utf-8") as fh:
-            fh.write('{"Windows":[],"Showing":{}}')
-        self.assertEqual(paths.read_json(self.path(LAYOUT_FILE)), {"Windows": [], "Showing": {}})
+            fh.write('{"Setups":[]}')
+        with mock.patch.object(datafolder, "current", return_value=os.path.join(self.dir, "in use")):
+            self.assertEqual(paths.read_json(self.path(SETTINGS_FILE)), {"StartMenu": True})
+            self.assertEqual(paths.read_json(self.path(LAYOUT_FILE)), {}, "format 1's step: places start empty")
 
     def test_a_newer_format_asks_and_otherwise_reads_as_damaged(self):
         newer = '{"Windows":[],"Showing":{},"Format":%d}' % (paths.FORMAT + 1)
@@ -171,8 +175,8 @@ class FileFormat(Base):
 
     def test_a_missing_upgrade_step_is_damaged_never_an_error(self):
         with open(self.path(LAYOUT_FILE), "w", encoding="utf-8") as fh:
-            fh.write('{"Windows":[],"Format":1}')
-        with mock.patch.object(paths, "FORMAT", 2), mock.patch.dict(paths.MIGRATIONS, {}, clear=True):
+            fh.write('{"Windows":[],"Format":%d}' % paths.FORMAT)
+        with mock.patch.object(paths, "FORMAT", paths.FORMAT + 1), mock.patch.dict(paths.MIGRATIONS, {}, clear=True):
             with self.assertRaises(ValueError):
                 paths.read_json(self.path(LAYOUT_FILE))
 
@@ -184,7 +188,8 @@ class FileFormat(Base):
         before = self.raw(LAYOUT_FILE)
         crypto.reset()
         crypto.add_key("theirs")
-        with mock.patch.object(paths, "FORMAT", 2), mock.patch.dict(paths.MIGRATIONS, {1: lambda n, d: d}), \
+        older = paths.FORMAT
+        with mock.patch.object(paths, "FORMAT", older + 1), mock.patch.dict(paths.MIGRATIONS, {older: lambda n, d: d}), \
                 mock.patch.object(datafolder, "current", return_value=self.dir):  # (the folder in use: the form decides)
             self.assertEqual(paths.read_json(self.path(LAYOUT_FILE)), {"Windows": []})
         self.assertEqual(self.raw(LAYOUT_FILE), before, "left as it was")
@@ -202,13 +207,14 @@ class FileFormat(Base):
 
     def test_an_older_format_is_brought_up_to_date_when_read_and_rewritten(self):
         with open(self.path(LAYOUT_FILE), "w", encoding="utf-8") as fh:
-            fh.write('{"Windows":[],"Old":1,"Format":1}')
+            fh.write('{"Windows":[],"Old":1,"Format":%d}' % paths.FORMAT)
         step = lambda name, data: {**{k: v for k, v in data.items() if k != "Old"}, "New": name}  # noqa: E731
-        with mock.patch.object(paths, "FORMAT", 2), mock.patch.dict(paths.MIGRATIONS, {1: step}), \
+        older, newer = paths.FORMAT, paths.FORMAT + 1
+        with mock.patch.object(paths, "FORMAT", newer), mock.patch.dict(paths.MIGRATIONS, {older: step}), \
                 mock.patch.object(datafolder, "current", return_value=self.dir):
             self.assertEqual(paths.read_json(self.path(LAYOUT_FILE)), {"Windows": [], "New": LAYOUT_FILE})
             self.assertEqual(json.loads(self.raw(LAYOUT_FILE)),
-                             {"Windows": [], "New": LAYOUT_FILE, "Format": 2}, "rewritten in the new format")
+                             {"Windows": [], "New": LAYOUT_FILE, "Format": newer}, "rewritten in the new format")
 
     def test_a_file_without_the_number_is_upgraded_as_format_1(self):
         with open(self.path(LAYOUT_FILE), "w", encoding="utf-8") as fh:
@@ -220,25 +226,27 @@ class FileFormat(Base):
 
     def test_reading_never_rewrites_another_folders_file_nor_a_journal(self):
         step = lambda name, data: data  # noqa: E731
+        older = paths.FORMAT
+        written = '{"Windows":[],"Format":%d}' % older
         for name in (LAYOUT_FILE, JOURNAL_FILE):
             with open(self.path(name), "w", encoding="utf-8") as fh:
-                fh.write('{"Windows":[],"Format":1}')
+                fh.write(written)
         elsewhere = os.path.join(self.dir, "in use")
-        with mock.patch.object(paths, "FORMAT", 2), mock.patch.dict(paths.MIGRATIONS, {1: step}), \
+        with mock.patch.object(paths, "FORMAT", older + 1), mock.patch.dict(paths.MIGRATIONS, {older: step}), \
                 mock.patch.object(datafolder, "current", return_value=elsewhere):
             paths.read_json(self.path(LAYOUT_FILE))
-        with mock.patch.object(paths, "FORMAT", 2), mock.patch.dict(paths.MIGRATIONS, {1: step}), \
+        with mock.patch.object(paths, "FORMAT", older + 1), mock.patch.dict(paths.MIGRATIONS, {older: step}), \
                 mock.patch.object(datafolder, "current", return_value=self.dir):
             paths.read_json(self.path(JOURNAL_FILE))
         for name in (LAYOUT_FILE, JOURNAL_FILE):
-            self.assertEqual(json.loads(self.raw(name))["Format"], 1, f"{name}: left for its own writer")
+            self.assertEqual(json.loads(self.raw(name))["Format"], older, f"{name}: left for its own writer")
         old = self.path("hidden.json")  # (an older journal name)
         with open(old, "w", encoding="utf-8") as fh:
-            fh.write('{"Windows":[],"Format":1}')
-        with mock.patch.object(paths, "FORMAT", 2), mock.patch.dict(paths.MIGRATIONS, {1: step}), \
+            fh.write(written)
+        with mock.patch.object(paths, "FORMAT", older + 1), mock.patch.dict(paths.MIGRATIONS, {older: step}), \
                 mock.patch.object(datafolder, "current", return_value=self.dir):
             paths.read_json(old)
-        self.assertEqual(json.loads(self.raw("hidden.json"))["Format"], 1, "an older journal name too")
+        self.assertEqual(json.loads(self.raw("hidden.json"))["Format"], older, "an older journal name too")
 
     def test_the_start_asks_and_quit_or_recreate_decides(self):
         from src import tray as T
@@ -411,8 +419,10 @@ class FileFormat(Base):
 
     def test_an_upgrade_step_that_fails_is_damaged_and_its_write_is_quiet(self):
         with open(self.path(LAYOUT_FILE), "w", encoding="utf-8") as fh:
-            fh.write('{"Windows":[],"Format":1}')
-        with mock.patch.object(paths, "FORMAT", 2), mock.patch.dict(paths.MIGRATIONS, {1: lambda n, d: d["Missing"]}):
+            fh.write('{"Windows":[],"Format":%d}' % paths.FORMAT)
+        older = paths.FORMAT
+        with mock.patch.object(paths, "FORMAT", older + 1), \
+                mock.patch.dict(paths.MIGRATIONS, {older: lambda n, d: d["Missing"]}):
             with self.assertRaises(ValueError):
                 paths.read_json(self.path(LAYOUT_FILE))
         reported = []
@@ -495,7 +505,7 @@ class Folder(Base):
         self.assertTrue(crypto.folder_encrypted(self.dir) and crypto.unlocks(self.dir, "secret"))
         crypto.use("secret", False)
         self.assertEqual(crypto.recode_folder(self.dir), [])
-        self.assertEqual(json.loads(self.raw(SETTINGS_FILE)), {"StartMenu": True, "Format": 1}, "plain again")
+        self.assertEqual(json.loads(self.raw(SETTINGS_FILE)), {"StartMenu": True, "Format": 2}, "plain again")
 
     def test_a_question_that_fails_halfway_leaves_no_window(self):
         from src import gui as G
@@ -620,7 +630,7 @@ class Tray(Base):
             remember.assert_called_with("secret")
             self.assertTrue(self.T.TrayApp.set_encryption(app, None, False, True))
             remember.assert_called_with(None)
-        self.assertEqual(json.loads(self.raw(SETTINGS_FILE)), {"StartMenu": True, "Format": 1})
+        self.assertEqual(json.loads(self.raw(SETTINGS_FILE)), {"StartMenu": True, "Format": 2})
 
 
 if __name__ == "__main__":

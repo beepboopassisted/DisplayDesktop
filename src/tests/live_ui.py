@@ -1608,7 +1608,11 @@ def main() -> int:
                 G.SendMessageW(bw.hwnd, G.WM_COMMAND, RW.IDCANCEL, 0)
             pump(50)
             check(not bw.hwnd, f"that folder's dialog, {how}: closed (the folder is not used)")
-        # Try Key in Recovery (the files may only need another key), and the key popup
+        # Try Key in Recovery (the files may only need another key), and the key popup. A wrong key asks
+        # to try again (Retry / Cancel; answered here without a real box)
+        asked, answers = [], []
+        real_box = G.message_box
+        G.message_box = lambda text, flags: asked.append((text, flags)) or answers.pop(0)
         tried = []
         prob = RW.RecoveryWindow.show(REC.Report("Some files can't be read right now.",
                                                  [row("a", "display.desktop.settings.json",
@@ -1616,14 +1620,20 @@ def main() -> int:
                                       on_key=lambda key: tried.append(key) or key == "right")
         pump(150)
         RW._SetWindowTextW(prob._controls[RW.ID_KEY], "wrong")
+        answers.append(G.IDRETRY)
         G.SendMessageW(prob._controls[RW.ID_TRY], BM_CLICK, 0, None)
         pump(50)
-        check(tried == ["wrong"] and prob.hwnd and N.get_title(prob._controls[RW.ID_STATUS]) == RW.L.t("key.wrong"),
-              "Recovery's Try Key: a wrong key says so, it stays")
+        check(tried == ["wrong"] and prob.hwnd and N.get_title(prob._controls[RW.ID_STATUS]) == RW.L.t("key.wrong")
+              and asked == [(RW.L.t("key.retry"), G.MB_RETRYCANCEL | G.MB_ICONWARNING)],
+              "Recovery's Try Key: a wrong key says so and asks to try again; Retry: it stays")
+        answers.append(2)  # IDCANCEL
+        G.SendMessageW(prob._controls[RW.ID_TRY], BM_CLICK, 0, None)
+        pump(50)
+        check(len(asked) == 2 and prob.hwnd, "Recovery's Try Key: Cancel: Recovery stays open")
         RW._SetWindowTextW(prob._controls[RW.ID_KEY], "right")
         G.SendMessageW(prob._controls[RW.ID_TRY], BM_CLICK, 0, None)
         pump(50)
-        check(tried == ["wrong", "right"] and not prob.hwnd and prob.result == "key",
+        check(tried == ["wrong", "wrong", "right"] and not prob.hwnd and prob.result == "key",
               "the right key reads the files and closes Recovery")
         closed = []
         kw = RW.KeyWindow.show("Q:\\Encrypted", lambda key: key == "right", on_closed=closed.append)
@@ -1631,9 +1641,11 @@ def main() -> int:
         check(kw.hwnd and N.is_window_visible(kw.hwnd) and G.SendMessageW(kw._controls[RW.ID_KEY], 0x00D2, 0, None)
               == SW.PASSWORD_CHAR, "the key popup opens, the key as dots")
         RW._SetWindowTextW(kw._controls[RW.ID_KEY], "wrong")
+        answers.append(G.IDRETRY)
         G.SendMessageW(kw._controls[RW.IDOK], BM_CLICK, 0, None)
         pump(50)
-        check(kw.hwnd and N.get_title(kw._controls[RW.ID_STATUS]) == RW.L.t("key.wrong"), "a wrong key: asked again")
+        check(kw.hwnd and N.get_title(kw._controls[RW.ID_STATUS]) == RW.L.t("key.wrong") and len(asked) == 3,
+              "a wrong key: asked to try again; Retry: asked again")
         RW._SetWindowTextW(kw._controls[RW.ID_KEY], "right")
         G.SendMessageW(kw._controls[RW.IDOK], BM_CLICK, 0, None)
         pump(50)
@@ -1643,6 +1655,15 @@ def main() -> int:
         G.SendMessageW(kw._controls[RW.IDCANCEL], BM_CLICK, 0, None)
         pump(50)
         check(not kw.hwnd and not kw.accepted and closed == [True, False], "Cancel: closed, nothing accepted")
+        kw = RW.KeyWindow.show("Q:\\Encrypted", lambda key: False, on_closed=closed.append)
+        pump(100)
+        RW._SetWindowTextW(kw._controls[RW.ID_KEY], "wrong")
+        answers.append(2)  # IDCANCEL
+        G.SendMessageW(kw._controls[RW.IDOK], BM_CLICK, 0, None)
+        pump(50)
+        check(not kw.hwnd and not kw.accepted and closed == [True, False, False] and len(asked) == 4,
+              "a wrong key, not tried again: closed as Cancel")
+        G.message_box = real_box
         # Recovery opened from Settings: Close in Quit's place (the default), no Continue; Close, Esc
         # and the title bar's X never quit the app, not even when files must be decided
         for name, report in (("no problems", ok_report), ("files that can't be read", bad)):

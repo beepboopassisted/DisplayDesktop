@@ -10,8 +10,10 @@ import unittest
 import unittest.mock
 
 from src import native as N
+from src import paths
 from src.paths import JOURNAL_FILE, LAYOUT_FILE, PLACES_FILE
 
+from fakes import all_showing, all_windows, layout_data, showing_data
 from test_desktop_manager import D1, D2, Base
 
 
@@ -526,8 +528,9 @@ class NeverShownOnTheWay(Base):
         self.win.cursor_device = D1
         with open(self.layout_file, encoding="utf-8") as fh:
             saved = json.load(fh)
-        saved["Showing"] = {}                    # Load must not switch: a lands on a desktop not shown
-        for e in saved["Windows"]:
+        for s in saved["Setups"]:
+            s["Showing"] = {}                    # Load must not switch: a lands on a desktop not shown
+        for e in all_windows(saved):
             e["Desktop"] = 2
         with open(self.layout_file, "w", encoding="utf-8") as fh:
             json.dump(saved, fh)
@@ -586,13 +589,14 @@ class PlacedWhileHidden(Base):
     """Fourth review: a window placed while hidden gets its saved state, on the monitor it was placed
     on, when it is shown, and a state kept for later never outlives the reason for it."""
 
-    def saved_layout(self, desktop, monitor_id, show_cmd, rect):
+    def saved_layout(self, desktop, display, show_cmd, rect):
         with open(self.layout_file, "w", encoding="utf-8") as fh:
-            json.dump({"Windows": [{"Exe": r"C:\Apps\app.exe", "Class": "AppWindow",
-                                    "TitleHash": __import__("src.layout", fromlist=["title_hash"]).title_hash("A"),
-                                    "MonitorId": monitor_id, "Desktop": desktop, "WorkLeft": 1920 if monitor_id == "MON-B" else 0,
-                                    "WorkTop": 0, "ShowCmd": show_cmd, "Left": rect[0], "Top": rect[1],
-                                    "Right": rect[2], "Bottom": rect[3]}], "Showing": {}}, fh)
+            json.dump(dict(layout_data([{"Exe": r"C:\Apps\app.exe", "Class": "AppWindow",
+                                         "TitleHash": __import__("src.layout", fromlist=["title_hash"]).title_hash("A"),
+                                         "Display": display, "Desktop": desktop,
+                                         "WorkLeft": 1920 if display == "MON-B" else 0,
+                                         "WorkTop": 0, "ShowCmd": show_cmd, "Left": rect[0], "Top": rect[1],
+                                         "Right": rect[2], "Bottom": rect[3]}], {}), Format=paths.FORMAT), fh)
 
     def test_a_hidden_maximized_window_placed_on_another_monitor_shows_maximized_there(self):
         a = self.win.add("A", 0, rect=(100, 100, 900, 700))
@@ -781,10 +785,10 @@ class SixthReview(Base):
         with unittest.mock.patch("src.layout.write_json", return_value=False):
             m.clear_desktops()
         with open(self.layout_file, encoding="utf-8") as fh:
-            self.assertNotEqual(json.load(fh)["Windows"], [], "(not written yet)")
+            self.assertNotEqual(all_windows(json.load(fh)), [], "(not written yet)")
         m.sync()
         with open(self.layout_file, encoding="utf-8") as fh:
-            self.assertEqual(json.load(fh)["Windows"], [], "written by the next sync: the save never comes back")
+            self.assertEqual(all_windows(json.load(fh)), [], "written by the next sync: the save never comes back")
 
 
 class UnreadableAtStart(Base):
@@ -1127,7 +1131,7 @@ class UnreadableAtStart(Base):
         paths._read_next.clear()
         m2.snapshot()
         with open(os.path.join(self.dir, PLACES_FILE), encoding="utf-8") as fh:
-            handles = [w["Handle"] for w in json.load(fh)["Windows"]]
+            handles = [w["Handle"] for w in all_windows(json.load(fh))]
         self.assertEqual(handles, [a], "this run's record once, not twice")
 
     def test_shown_desktops_read_late_are_brought_back(self):
@@ -1261,15 +1265,15 @@ class UnreadableAtStart(Base):
         from src.last_shown import LastShown
         path = os.path.join(self.dir, SHOWING_FILE)
         with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"Showing": {"MON-A": 2, "MON-B": 1}}, fh)
+            json.dump(dict(showing_data({"MON-A": 2, "MON-B": 1}), Format=paths.FORMAT), fh)
         with self.held(SHOWING_FILE):
             ls = LastShown(self.dir)
+            ls.use_setup(("MON-A", "MON-B"))
             ls.set("MON-A", 3)
-        self.assertEqual(json.loads(read_text(path))["Showing"], {"MON-A": 2, "MON-B": 1})
-        from src import paths
+        self.assertEqual(all_showing(json.loads(read_text(path))), {"MON-A": 2, "MON-B": 1})
         paths._read_next.clear()  # (READ_RETRY_S later)
         ls.flush()
-        self.assertEqual(json.loads(read_text(path))["Showing"], {"MON-A": 3, "MON-B": 1},
+        self.assertEqual(all_showing(json.loads(read_text(path))), {"MON-A": 3, "MON-B": 1},
                          "read, then this run's change written over it (nothing else lost)")
 
 
@@ -1286,7 +1290,7 @@ class EighthReview(Base):
         shutil.copy(self.layout_file, other)  # (the move copied the old, uncleared save)
         m.relocate(other)
         with open(os.path.join(other, os.path.basename(self.layout_file)), encoding="utf-8") as fh:
-            self.assertEqual(json.load(fh)["Windows"], [], "the Clear is written there, not undone")
+            self.assertEqual(all_windows(json.load(fh)), [], "the Clear is written there, not undone")
 
     def test_our_journal_left_in_the_old_folder_goes_once_ours_is_in_the_new_one(self):
         a = self.win.add("A")
@@ -1400,7 +1404,7 @@ class EighthReview(Base):
         for h in wins:
             m.move_window_to_desktop(h, D1, 0)
         saved = json.loads(read_text(self.layout_file))
-        for e in saved["Windows"]:
+        for e in all_windows(saved):
             e["Desktop"] = 1
         with open(self.layout_file, "w", encoding="utf-8") as fh:
             json.dump(saved, fh)
@@ -1470,7 +1474,8 @@ class SeventhReview(Base):
         PlacedWhileHidden.saved_layout(self, 0, "MON-B", 1, (2000, 100, 2800, 700))  # editor on D2 desktop 1
         with open(self.layout_file, encoding="utf-8") as fh:
             saved = json.load(fh)
-        saved["Windows"][0]["Exe"], saved["Windows"][0]["TitleHash"] = self.win.windows[main].exe, \
+        entry = all_windows(saved)[0]
+        entry["Exe"], entry["TitleHash"] = self.win.windows[main].exe, \
             __import__("src.layout", fromlist=["title_hash"]).title_hash("Editor")
         with open(self.layout_file, "w", encoding="utf-8") as fh:
             json.dump(saved, fh)

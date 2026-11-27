@@ -476,6 +476,43 @@ def get_monitor_id(device: str) -> str:
     return ""
 
 
+_display_names: dict[str, str] = {}  # device interface path -> display name (a path's EDID never changes)
+
+
+def edid_name(edid: bytes) -> str:
+    """The monitor name an EDID holds (its 0xFC descriptor), "" if none."""
+    for o in range(54, min(len(edid), 126), 18):
+        d = edid[o:o + 18]
+        if len(d) == 18 and d[0:3] == b"\0\0\0" and d[3] == 0xFC:
+            return d[5:18].split(b"\n")[0].decode("cp437").strip()
+    return ""
+
+
+def display_name(monitor_id: str) -> str:
+    """The display's name, from the monitor's own EDID (as Windows shows it in Settings); its
+    hardware id ("ABC1234") when the EDID has no name. Unlike \\\\.\\DISPLAYn, the same monitor
+    has the same name on any port. "" for an unknown monitor."""
+    if not monitor_id:
+        return ""
+    name = _display_names.get(monitor_id)
+    if name is None:
+        # \\?\DISPLAY#<hardware id>#<instance>#{interface class}
+        parts = monitor_id.split("#")
+        name = parts[1] if len(parts) >= 3 else monitor_id
+        if len(parts) >= 3:
+            import winreg
+            key = rf"SYSTEM\CurrentControlSet\Enum\DISPLAY\{parts[1]}\{parts[2]}\Device Parameters"
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as k:
+                    edid = winreg.QueryValueEx(k, "EDID")[0]
+                if isinstance(edid, bytes):
+                    name = edid_name(edid) or name
+            except OSError:
+                pass
+        _display_names[monitor_id] = name
+    return name
+
+
 # ---------------------------------------------------------------- placement (saved layout)
 
 

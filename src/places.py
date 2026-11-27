@@ -29,7 +29,7 @@ import time
 from . import native as N
 from . import paths
 from .paths import PLACES_FILE, is_int, write_json
-from .layout import LOOSE, Entry, Place, WindowLayout
+from .layout import LOOSE, Entry, Place, WindowLayout, read_setups
 
 CLOSED_KEEP_S = 30
 HEARTBEAT_S = 60
@@ -67,7 +67,9 @@ class WindowPlaces(WindowLayout):
         self._last_write = 0.0
         self._last_payload: tuple | None = None  # what the last write held (None: none yet, or write_next)
         self._ids: dict[int, tuple[int, int]] = {}  # id(entry) -> (window handle, process id)
-        self._counts: dict[str, int] = {}  # monitor id -> number of desktops (empty ones count too)
+        # setup -> display name -> number of desktops (empty ones count too)
+        self._counts: dict[tuple, dict[str, int]] = {}
+        self._whole_setup = False  # assign_setup: every open place of the setup is a candidate
         self._grace_over = False  # a record without keep_pending was made: last session's places are done
         self._forced = False  # write_next: the next write is wanted now (a late read is tried at once)
         self.late_read = False  # read late, during the startup grace: the manager applies it (take_late_read)
@@ -79,8 +81,11 @@ class WindowPlaces(WindowLayout):
         updated = data.get("Updated")
         updated = updated if (is_int(updated) or isinstance(updated, float)) else 0
         keep = []
-        self._counts = {str(k): v for k, v in (data.get("Desktops") or {}).items()
-                        if is_int(v) and v > 0}
+        self._counts = {}
+        for setup, s in read_setups(data):
+            counts = {str(k): v for k, v in (s.get("Desktops") or {}).items() if is_int(v) and v > 0}
+            if counts:
+                self._counts[setup] = counts
         # Handles are only meaningful within the boot that wrote them (they are reused later)
         this_boot = same_boot(data.get("UptimeMs"), updated if updated else None, self._win)
         for e, raw in pairs:
@@ -95,8 +100,21 @@ class WindowPlaces(WindowLayout):
         self._pending = {id(e) for e in keep}
 
     def _candidates(self) -> list[Entry]:
-        # Only places from the last session: a window closed and reopened now is never put back
-        return [e for e in self._entries if id(e) in self._pending]
+        # Only places from the last session: a window closed and reopened now is never put back.
+        # assign_setup: every place of the setup whose window was open when last recorded.
+        setup, pending, closed = self._setup, self._pending, self._closed
+        if self._whole_setup:
+            return [e for e in self._entries if e.Setup == setup and (id(e) in pending or id(e) not in closed)]
+        return [e for e in self._entries if e.Setup == setup and id(e) in pending]
+
+    def assign_setup(self, windows: list[int]) -> list[tuple[int, Entry]]:
+        """Displays attached or detached: the open windows matched to the places recorded for the
+        setup in use (its own window first, as at a start)."""
+        self._whole_setup = True
+        try:
+            return self.assign(windows)
+        finally:
+            self._whole_setup = False
 
     def _pid_of(self, e: Entry) -> int:
         return self._ids.get(id(e), (0, 0))[1]  # only known within the boot that recorded it
@@ -122,10 +140,10 @@ class WindowPlaces(WindowLayout):
             self._pending.discard(id(e))
         return result
 
-    def desktop_count(self, monitor_id: str) -> int:
-        """How many desktops the monitor had last time (0 if unknown): empty desktops are only ever
-        removed by the user, so they come back too."""
-        return self._counts.get(monitor_id, 0)
+    def desktop_count(self, display: str) -> int:
+        """How many desktops the display had last time in the setup in use (0 if unknown): empty
+        desktops are only ever removed by the user, so they come back too."""
+        return self._counts.get(self._setup, {}).get(display, 0)
 
     def record(self, windows: list[Place], keep_pending: bool, counts: dict[str, int]) -> None:
         """Records where the given windows are now. Kept as well: windows left out that are still
@@ -144,8 +162,12 @@ class WindowPlaces(WindowLayout):
             self._pending.clear()
             self._grace_over = True
         entries = []
+        setup = self._setup
         for e in self._entries:
             i = id(e)
+            if e.Setup != setup:
+                entries.append(e)  # (another setup's places: kept as last recorded there)
+                continue
             if i in taken_anew:
                 continue
             if i in waiting or i in self._pending or now - self._closed.get(i, -1e18) <= CLOSED_KEEP_S:
@@ -163,7 +185,7 @@ class WindowPlaces(WindowLayout):
         kept = {id(e) for e in entries}
         self._ids = {i: v for i, v in self._ids.items() if i in kept}
         if counts:
-            self._counts.update(counts)  # monitors not attached now keep their count
+            self._counts[setup] = dict(counts)
         self._write_places(now, force=False)
 
     def heartbeat(self) -> None:
@@ -196,9 +218,11 @@ class WindowPlaces(WindowLayout):
                 self._entries, self._counts = mine, counts
                 self._last_write = now  # (the heartbeat waits too: not a read every sync)
                 return
-            found = bool(self._counts)
-            for k, v in counts.items():  # (desktops are never removed by themselves: the larger count)
-                self._counts[k] = max(self._counts.get(k, 0), v)
+            found = bool(self._counts.get(self._setup))
+            for setup, mine_counts in counts.items():  # (desktops are never removed by themselves: the larger count)
+                theirs = self._counts.setdefault(setup, {})
+                for k, v in mine_counts.items():
+                    theirs[k] = max(theirs.get(k, 0), v)
             loaded = [] if self._grace_over else self._entries
             self._pending = {id(e) for e in loaded}
             self._entries = mine + loaded
@@ -219,17 +243,24 @@ class WindowPlaces(WindowLayout):
             rows.append((e, closed.get(i, 0), handle, pid))
         # What would be written (every value of every record, the counts), compared without building
         # the JSON: it is only made when written
-        payload = (tuple((e.Exe, e.Class, e.TitleHash, e.MonitorId, e.Desktop, e.WorkLeft, e.WorkTop, e.ShowCmd,
-                          e.Left, e.Top, e.Right, e.Bottom, tuple(e.TitleParts), c, h, p) for e, c, h, p in rows),
-                   tuple(sorted(self._counts.items())))
+        payload = (tuple((e.Setup, e.Exe, e.Class, e.TitleHash, e.Display, e.Desktop, e.WorkLeft, e.WorkTop,
+                          e.ShowCmd, e.Left, e.Top, e.Right, e.Bottom, tuple(e.TitleParts), c, h, p)
+                         for e, c, h, p in rows),
+                   tuple(sorted((k, tuple(sorted(v.items()))) for k, v in self._counts.items())))
         if not force and payload == self._last_payload and now - self._last_write < HEARTBEAT_S:
             return  # nothing changed: no disk write
         if self._last_payload is not None and not paths.write_due(self._file):
             return  # (held by another program a moment ago: no 0.2 s wait every 2 s; forced ones go)
         self._last_write = now
-        windows = [dict(e.to_json(), Closed=c, Handle=h, Pid=p) for e, c, h, p in rows]
-        if write_json(self._file, {"Updated": now, "UptimeMs": self._win.tick_count64(), "Desktops": self._counts,
-                                   "Windows": windows}):
+        # {"Updated", "UptimeMs", "Setups": [{"Displays", "Windows", "Desktops"}]}
+        setups = {}
+        for e, c, h, p in rows:
+            setups.setdefault(e.Setup, {"Displays": list(e.Setup), "Windows": []})["Windows"].append(
+                dict(e.to_json(), Closed=c, Handle=h, Pid=p))
+        for key, counts in self._counts.items():
+            setups.setdefault(key, {"Displays": list(key), "Windows": []})["Desktops"] = counts
+        if write_json(self._file, {"Updated": now, "UptimeMs": self._win.tick_count64(),
+                                   "Setups": list(setups.values())}):
             self._last_payload = payload  # (only once written: a failed write is tried again)
 
     def relocate(self, directory: str) -> None:

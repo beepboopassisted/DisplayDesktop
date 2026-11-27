@@ -28,6 +28,7 @@ from src import tray as T  # noqa: E402
 from src.app import MUTEX_NAME  # noqa: E402
 from src.paths import JOURNAL_FILE, PLACES_FILE  # noqa: E402
 
+from fakes import all_desktops, all_showing, all_windows  # noqa: E402
 from live_core import PYTHONW, Helper, check, results, wait_for  # noqa: E402
 
 _OpenMutexW = N._f(N.kernel32, "OpenMutexW", N.H, N.DWORD, N.BOOL, ctypes.c_wchar_p)
@@ -251,7 +252,7 @@ def main() -> int:
         check(wait_for(lambda: os.path.exists(layout), 3), "answer Yes: layout.json saved")
         with open(layout, encoding="utf-8") as fh:
             saved = json.load(fh)
-        check(len(saved["Windows"]) == 2 and saved["Showing"], "it holds the 2 test windows and the shown desktops")
+        check(len(all_windows(saved)) == 2 and all_showing(saved), "it holds the 2 test windows and the shown desktops")
         mtime = os.path.getmtime(layout)
         app.command(T.ID_LOAD)
         check(answer(app.pid, 7) != "", "Load desktops asks first")
@@ -274,7 +275,7 @@ def main() -> int:
         answer(app.pid, 6)
         time.sleep(0.5)
         with open(layout, encoding="utf-8") as fh:
-            check(json.load(fh) == {"Windows": [], "Showing": {}, "Format": 1}, "answer Yes: saved layout erased")
+            check(json.load(fh) == {"Setups": [], "Format": 2}, "answer Yes: saved layout erased")
         app.command(T.ID_SETTINGS)
         check(wait_for(lambda: bool(windows_of(app.pid, "DisplayDesktop.Settings", True)), 5),
               "Settings opens its dialog")
@@ -353,8 +354,8 @@ def main() -> int:
             with open(places, encoding="utf-8") as fh:
                 data = json.load(fh)
             # the test windows are in the last snapshot, and so is the second desktop (it was shown)
-            return (len([e for e in data["Windows"] if not e.get("Closed")]) >= 2
-                    and max((data.get("Desktops") or {"": 0}).values()) >= 2)
+            return (len([e for e in all_windows(data) if not e.get("Closed")]) >= 2
+                    and max((all_desktops(data) or {"": 0}).values()) >= 2)
 
         # 1) --quit (same quit event that run.cmd Stop sets)
         check(hide_then(app), "[--quit] windows hidden first")
@@ -418,7 +419,7 @@ def main() -> int:
         check(not os.path.exists(journal), "[crash] journal deleted")
         check(next_start_restores(), "[crash] the next start puts the windows back")
         with open(places, encoding="utf-8") as fh:
-            entries = {e.get("TitleHash"): e for e in json.load(fh)["Windows"] if not e.get("Closed")}
+            entries = {e.get("TitleHash"): e for e in all_windows(json.load(fh)) if not e.get("Closed")}
         two = entries.get(title_hash(N.get_title(on_two)), {})
         one = entries.get(title_hash(N.get_title(on_one)), {})
         check((two.get("Desktop") or 0) >= 1 and one.get("Desktop") == 0,
@@ -466,7 +467,8 @@ def main() -> int:
               "[encrypted] the start asks for the key before anything else")
         popup = key_popup(app.pid)
         type_key(popup, "wrong")
-        time.sleep(0.5)
+        check(answer(app.pid, G.IDRETRY, 10) != "", "[encrypted] a wrong key asks to try again (Retry)")
+        check(wait_for(lambda: dialog_of(app.pid) == 0, 10), "[encrypted] Retry: back to the key")
         status = ctypes.create_unicode_buffer(256)
         _GetWindowTextW(_GetDlgItem(popup, 209), status, 256)
         check(N.is_window(popup) and status.value != "", f"[encrypted] a wrong key is refused ({status.value!r})")

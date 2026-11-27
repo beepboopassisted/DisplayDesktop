@@ -14,6 +14,7 @@
 - **Desktops On Demand** - The Overview shows every desktop on every monitor, with previews. Add and delete desktops in the Overview. Drag windows or desktops to rearrange them.
 - **Picks Up Where You Left Off** - Windows and desktops are remembered, even when DisplayDesktop quits or Windows shuts down. The next start puts everything back.
 - **Save And Load Desktops** - **Save** remembers where every window is. **Load** puts it all back whenever you like.
+- **Remembers Each Display Setup** - Windows and desktops are remembered separately for each set of displays, by display name. Attach or detach a display and every window goes back to where it was with those displays.
 
 ## Requirements
 
@@ -48,8 +49,8 @@ DisplayDesktop starts in the system tray (two blue screens icon). You can also d
 
 - **Overview** - All desktops on all monitors (`Ctrl+Alt+↑`).
 - **Left** / **Right** - Previous / next desktop under the mouse (`Ctrl+Alt+←/→`).
-- **Load** - Puts windows back where they were saved.
-- **Save** - Saves desktops and window positions.
+- **Load** - Puts windows back where they were saved with the displays attached now.
+- **Save** - Saves desktops and window positions for the displays attached now.
 - **Settings**
     - **Start With Windows** - Starts at sign-in.
     - **Add To Start Menu** - Adds DisplayDesktop to the Start menu.

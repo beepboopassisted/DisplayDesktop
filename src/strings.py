@@ -35,6 +35,7 @@ _TEXT = {
     "key.label": "Encryption key",
     "key.try": "Try Key",
     "key.wrong": "That key doesn't open the settings.",
+    "key.retry": "That key doesn't open the settings.\n\nTry again?",
     "key.show": "Show",
     "key.hide": "Hide",
     "msg.encryptFail": "Some files could not be rewritten (in use, or encrypted with another key):\n\n{0}",

@@ -4,20 +4,24 @@ starts, or a monitor is attached, that monitor goes back to this desktop as soon
 
 This is separate from the saved desktops (layout.json): "Save" stores its own copy of what
 each monitor shows, "Load" uses that copy, and neither ever changes this file.
-Monitors are keyed by the same stable identity as layout.json (native.get_monitor_id).
+Kept per display setup, by display name, like layout.json and places.json:
+{"Setups": [{"Displays": [...], "Showing": {name: desktop}}]}.
 """
 from __future__ import annotations
 
 import os
 
 from . import paths
+from .layout import read_setups
 from .paths import SHOWING_FILE, is_int, write_json
 
 
 class LastShown:
     def __init__(self, directory: str):
         self._file = os.path.join(directory, SHOWING_FILE)
-        self._showing: dict[str, int] = {}
+        self._all: dict[tuple, dict[str, int]] = {}  # setup -> display name -> desktop shown
+        self._setup: tuple = ()
+        self._showing: dict[str, int] = self._all.setdefault((), {})  # the setup in use's
         self._unread = False
         self.late_read = False  # read after the start could not: the shown desktops apply now
         self._read()
@@ -35,8 +39,11 @@ class LastShown:
                 self._unread = not os.path.isdir(folder) and paths.offline(folder)
                 return
             data = paths.read_json(self._file)
-            read = {str(k): v for k, v in (data.get("Showing") or {}).items() if is_int(v) and v >= 0}
-            self._showing = {**read, **self._showing}  # (what this run set since wins)
+            for setup, s in read_setups(data):
+                read = {str(k): v for k, v in (s.get("Showing") or {}).items() if is_int(v) and v >= 0}
+                mine = self._all.setdefault(setup, {})
+                for k, v in read.items():
+                    mine.setdefault(k, v)  # (what this run set since wins)
             self.late_read = self._unread  # (read now after all: the manager applies it, take_late_read)
             self._unread = False
         except OSError as exc:
@@ -52,18 +59,23 @@ class LastShown:
         """After a move: what this run remembers is written to the new folder, merged into what is
         there (this run's values win; a file not readable yet is written once it is)."""
         self._read()
-        if self._showing:
+        if any(self._all.values()):
             self._write()
 
-    def get(self, monitor_id: str) -> int | None:
-        """The desktop index the monitor showed last, if known."""
-        return self._showing.get(monitor_id) if monitor_id else None
+    def use_setup(self, setup: tuple) -> None:
+        """The displays attached now (layout.setup_key): get/set are that setup's."""
+        self._setup = setup
+        self._showing = self._all.setdefault(setup, {})
 
-    def set(self, monitor_id: str, desktop: int) -> None:
-        """Remembers what the monitor shows now; writes the file only when it changed."""
-        if not monitor_id or self._showing.get(monitor_id) == desktop:
+    def get(self, display: str) -> int | None:
+        """The desktop index the display showed last in the setup in use, if known."""
+        return self._showing.get(display) if display else None
+
+    def set(self, display: str, desktop: int) -> None:
+        """Remembers what the display shows now; writes the file only when it changed."""
+        if not display or self._showing.get(display) == desktop:
             return
-        self._showing[monitor_id] = desktop
+        self._showing[display] = desktop
         self._write()
 
     def _write(self) -> None:
@@ -73,7 +85,8 @@ class LastShown:
             if self._unread:
                 self._dirty = True  # tried again by flush
                 return
-        self._dirty = not write_json(self._file, {"Showing": self._showing})
+        setups = [{"Displays": list(k), "Showing": v} for k, v in self._all.items() if v]
+        self._dirty = not write_json(self._file, {"Setups": setups})
 
     def flush(self) -> None:
         """A write that failed (the folder paused or briefly unwritable) is made again (every sync)."""

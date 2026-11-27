@@ -29,7 +29,7 @@ class ConsoleTests(unittest.TestCase):
         self.assertFalse(console.load_enabled())
         console.save_enabled(True)
         with open(os.path.join(self.tmp, "display.desktop.settings.json"), encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), '{"ShowConsole":true,"Format":1}')
+            self.assertEqual(fh.read(), '{"ShowConsole":true,"Format":2}')
         self.assertTrue(console.load_enabled())
         console.save_enabled(False)
         self.assertFalse(console.load_enabled())

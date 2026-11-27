@@ -40,8 +40,22 @@ NOT_READ_YET = -2  # WindowLayout.save: the save there can't be read right now (
 NOT_READABLE = -3  # ... and not because it is in use (a cloud file not available, no read right)
 LOCKED = -4        # ... because it is encrypted (Encrypt Settings) and no known key opens it
 
-_FIELDS = ("Exe", "Class", "TitleHash", "MonitorId", "Desktop", "WorkLeft", "WorkTop", "ShowCmd",
+_FIELDS = ("Exe", "Class", "TitleHash", "Display", "Desktop", "WorkLeft", "WorkTop", "ShowCmd",
            "Left", "Top", "Right", "Bottom")
+
+
+def setup_key(names) -> tuple:
+    """A display setup: the names of the displays attached, sorted (each setup keeps its own places)."""
+    return tuple(sorted({n for n in names if n}))
+
+
+def read_setups(data: dict) -> list[tuple[tuple, dict]]:
+    """The setups of a file: (setup, its object) for each {"Displays": [...], ...}; odd ones skipped."""
+    out = []
+    for s in data.get("Setups") or []:
+        if isinstance(s, dict) and isinstance(s.get("Displays"), list):
+            out.append((setup_key(str(n) for n in s["Displays"] if isinstance(n, str)), s))
+    return out
 
 # How sure a match is, from most to least: the windows are matched in this order, each level for
 # all windows before the next, so a weaker match never takes a place a stronger one would get.
@@ -53,18 +67,21 @@ LOOSE = 3    # same program and class only (any window of that app)
 
 class Entry:
     """One saved window. Identity semantics: two entries with equal data are still different windows.
-    MonitorId: stable monitor identity (native.get_monitor_id); Desktop: desktop index on that monitor
-    (0-based); WorkLeft/WorkTop: top-left of the monitor's work area when saved; TitleParts: hashes of
-    the title's parts (title_parts)."""
-    __slots__ = _FIELDS + ("TitleParts",)
+    Display: the display's name (unique in its setup); Desktop: desktop index on that display
+    (0-based); WorkLeft/WorkTop: top-left of the display's work area when saved; TitleParts: hashes of
+    the title's parts (title_parts); Setup: the display setup it belongs to (setup_key; not a field:
+    the file groups entries by setup)."""
+    __slots__ = _FIELDS + ("TitleParts", "Setup")
 
-    def __init__(self, Exe: str = "", Class: str = "", TitleHash: str = "", MonitorId: str = "",  # noqa: N803
+    def __init__(self, Exe: str = "", Class: str = "", TitleHash: str = "", Display: str = "",  # noqa: N803
                  Desktop: int = 0, WorkLeft: int = 0, WorkTop: int = 0, ShowCmd: int = 0, Left: int = 0,  # noqa: N803
-                 Top: int = 0, Right: int = 0, Bottom: int = 0, TitleParts: list | None = None):  # noqa: N803
-        self.Exe, self.Class, self.TitleHash, self.MonitorId = Exe, Class, TitleHash, MonitorId
+                 Top: int = 0, Right: int = 0, Bottom: int = 0, TitleParts: list | None = None,  # noqa: N803
+                 Setup: tuple = ()):  # noqa: N803
+        self.Exe, self.Class, self.TitleHash, self.Display = Exe, Class, TitleHash, Display
         self.Desktop, self.WorkLeft, self.WorkTop, self.ShowCmd = Desktop, WorkLeft, WorkTop, ShowCmd
         self.Left, self.Top, self.Right, self.Bottom = Left, Top, Right, Bottom
         self.TitleParts = [] if TitleParts is None else TitleParts
+        self.Setup = Setup
 
     def __repr__(self) -> str:
         return "Entry(" + ", ".join(f"{k}={getattr(self, k)!r}" for k in self.__slots__) + ")"
@@ -74,8 +91,8 @@ class Entry:
         return dict({k: getattr(self, k) for k in _FIELDS}, TitleParts=list(self.TitleParts))
 
     @staticmethod
-    def from_json(d: dict) -> "Entry":
-        e = Entry()
+    def from_json(d: dict, setup: tuple = ()) -> "Entry":
+        e = Entry(Setup=setup)
         for k in _FIELDS:
             if k in d and d[k] is not None:
                 v = d[k]
@@ -91,7 +108,7 @@ class Entry:
         return e
 
 
-Place = namedtuple("Place", "window monitor_id device desktop")  # a window to save: where it is now
+Place = namedtuple("Place", "window display device desktop")  # a window to save: where it is now
 
 
 EXE_CACHE_MAX = 1024  # program paths kept per (window, process)
@@ -153,6 +170,14 @@ def _title_parts(title: str) -> tuple[str, ...]:
     return tuple(parts)
 
 
+def group_setups(entries, row) -> dict:
+    """Setup -> {"Displays": [...], "Windows": [row(e), ...]}, in the entries' order."""
+    setups: dict[tuple, dict] = {}
+    for e in entries:
+        setups.setdefault(e.Setup, {"Displays": list(e.Setup), "Windows": []})["Windows"].append(row(e))
+    return setups
+
+
 class WindowLayout:
     FILE_NAME = LAYOUT_FILE
 
@@ -160,9 +185,11 @@ class WindowLayout:
         self._win = win
         self._file = os.path.join(directory, self.FILE_NAME)
         self._exe_cache: dict[tuple[int, int], str] = {}  # (window, pid) -> program path
-        self._entries: list[Entry] = []
-        self._showing: dict[str, int] = {}
-        self._bound: dict[int, Entry] = {}  # live window -> its entry
+        self._entries: list[Entry] = []  # every setup's (Entry.Setup)
+        self._showing: dict[tuple, dict[str, int]] = {}  # setup -> display name -> desktop shown
+        self._setup: tuple = ()  # the display setup attached now (use_setup)
+        self._names: dict[str, str] = {}  # device -> display name, in that setup
+        self._bound: dict[int, Entry] = {}  # live window -> its entry (of the setup in use)
         self._load_file()
 
     def relocate(self, directory: str) -> None:
@@ -192,8 +219,7 @@ class WindowLayout:
             elif self._entries or self._showing:
                 self._dirty = not self._write()  # (a failed write is made again by flush)
             return
-        mine = json.dumps({"Windows": [e.to_json() for e in self._entries], "Showing": self._showing},
-                          sort_keys=True)
+        mine = json.dumps(self._data(), sort_keys=True)
         try:
             theirs = json.dumps(paths.read_json(self._file), sort_keys=True)
         except (OSError, ValueError):
@@ -220,14 +246,16 @@ class WindowLayout:
                 self._held_since, self._held = None, False  # (not "in use": not there)
                 return
             data = paths.read_json(self._file)
-            raw = data.get("Windows") or []
-            entries = [Entry.from_json(e) for e in raw]
-            showing = {str(k): int(v) for k, v in (data.get("Showing") or {}).items()
-                       if is_int(v)}
-            self._entries, self._showing = entries, showing
+            pairs, showing = [], {}
+            for setup, s in read_setups(data):
+                pairs += [(Entry.from_json(e, setup), e) for e in s.get("Windows") or []]
+                shown = {str(k): int(v) for k, v in (s.get("Showing") or {}).items() if is_int(v)}
+                if shown:
+                    showing[setup] = shown
+            self._entries, self._showing = [e for e, _ in pairs], showing
             self._unread = False
             self._held_since = None
-            self._loaded(data, list(zip(entries, raw)))
+            self._loaded(data, pairs)
         except OSError as exc:
             self._unread = paths.unreadable(self._file, exc)
             # In use (a retry may work) only while refused for less than HELD_REFUSED_S: open() gives
@@ -251,9 +279,17 @@ class WindowLayout:
 
     # ---- queries
 
-    def showing_desktop(self, monitor_id: str) -> int | None:
-        """The desktop index the monitor was showing when saved, if any."""
-        return self._showing.get(monitor_id)
+    def showing_desktop(self, display: str) -> int | None:
+        """The desktop index the display was showing when saved (in the setup in use), if any."""
+        return self._showing.get(self._setup, {}).get(display)
+
+    def use_setup(self, setup: tuple, names: dict[str, str]) -> None:
+        """The displays attached now (setup_key; `names`: device -> display name): matching,
+        saving and recording use that setup's places only; every other setup's stay as they are."""
+        self._names = dict(names)
+        if setup != self._setup:
+            self._setup = setup
+            self._bound.clear()  # (entries of another setup)
 
     def is_bound(self, h: int) -> bool:
         return h in self._bound
@@ -327,7 +363,7 @@ class WindowLayout:
         # The parts the program puts in its titles (its name): never a site
         common = {key: program_parts(sets) for key, sets in titles.items()}
         pairs = []
-        monitor_ids: dict[str, str] = {}  # device -> monitor id (read once per display, not per window)
+        names = self._names
         for h, exe, cls, title, parts in seen:
             same_app = by_app.get((exe, cls))
             if not same_app:
@@ -339,11 +375,7 @@ class WindowLayout:
                 wp = w.get_placement(h)
             now = wp.rcNormalPosition.tup() if wp is not None else (0, 0, 0, 0)
             dev = w.monitor_device_of_window(h)
-            here = ""
-            if dev:
-                here = monitor_ids.get(dev)
-                if here is None:
-                    here = monitor_ids[dev] = w.get_monitor_id(dev)
+            here = names.get(dev, "") if dev else ""
             name = common[(exe, cls)]
             for e, eparts in same_app:
                 exact = e.TitleHash == th
@@ -354,7 +386,7 @@ class WindowLayout:
                 kind = PROCESS if same_process else EXACT if exact else SITE if shared else LOOSE
                 if kind > level:
                     continue
-                score = (same_process, exact, shared, bool(here) and e.MonitorId == here,
+                score = (same_process, exact, shared, bool(here) and e.Display == here,
                          -(abs(e.Left - now[0]) + abs(e.Top - now[1])))
                 pairs.append((score, h, e))
         pairs.sort(key=lambda p: p[0], reverse=True)  # stable: ties keep window/entry order
@@ -371,8 +403,9 @@ class WindowLayout:
         return result
 
     def _candidates(self) -> list[Entry]:
-        """Entries a newly seen window may be matched to."""
-        return self._entries
+        """Entries a newly seen window may be matched to: the setup in use's."""
+        setup = self._setup
+        return [e for e in self._entries if e.Setup == setup]
 
     def _entry_for(self, p: Place) -> Entry | None:
         """An entry for where the window is now (None if its placement cannot be read)."""
@@ -380,32 +413,29 @@ class WindowLayout:
         with w.in_window_dpi_context(p.window):
             wp = w.get_placement(p.window)
             work = w.get_work_area(p.device)
-        if wp is None or not work or work == (0, 0, 0, 0) or not p.monitor_id:
+        if wp is None or not work or work == (0, 0, 0, 0) or not p.display:
             return None
         r = wp.rcNormalPosition
         title = w.get_title(p.window)
         return Entry(Exe=self._exe_of(p.window), Class=w.get_class(p.window),
-                     TitleHash=title_hash(title), TitleParts=title_parts(title), MonitorId=p.monitor_id,
+                     TitleHash=title_hash(title), TitleParts=title_parts(title), Display=p.display, Setup=self._setup,
                      Desktop=p.desktop, WorkLeft=work[0], WorkTop=work[1], ShowCmd=wp.showCmd,
                      Left=r.left, Top=r.top, Right=r.right, Bottom=r.bottom)
 
     # ---- saving (manual only)
 
-    def save(self, windows: list[Place], showing: dict[str, int], attached_monitor_ids: set[str]) -> int:
-        """Tray "Save": replaces the memory of the attached monitors with where the
-        given windows are now and which desktop each monitor shows, and writes layout.json. Memory of
-        monitors that are not attached is kept (their windows cannot be arranged now). Returns the
-        number of windows saved, -1 if layout.json could not be written, or NOT_READ_YET while the
-        save there can't be read (writing would drop the other monitors' save: try again shortly)."""
+    def save(self, windows: list[Place], showing: dict[str, int]) -> int:
+        """Tray "Save": replaces the save of the display setup in use with where the given windows
+        are now and which desktop each display shows, and writes layout.json. Other setups' saves are
+        kept. Returns the number of windows saved, -1 if layout.json could not be written, or
+        NOT_READ_YET while the save there can't be read (writing would drop the other setups' saves:
+        try again shortly)."""
         problem = self.read_problem()
         if problem:
             return problem
-        anew = {p.window for p in windows}
-        taken_anew = {id(e) for h, e in self._bound.items() if h in anew}
-        entries = [e for e in self._entries
-                   if e.MonitorId not in attached_monitor_ids and id(e) not in taken_anew]
-        kept = {id(e) for e in entries}
-        bound = {h: e for h, e in self._bound.items() if id(e) in kept}
+        setup = self._setup
+        entries = [e for e in self._entries if e.Setup != setup]
+        bound: dict[int, Entry] = {}
 
         count = 0
         for p in windows:
@@ -416,9 +446,10 @@ class WindowLayout:
             bound[p.window] = e
             count += 1
 
-        new_showing = {k: v for k, v in self._showing.items() if k not in attached_monitor_ids}
-        new_showing.update(showing)
-        if not write_json(self._file, {"Windows": [e.to_json() for e in entries], "Showing": new_showing}):
+        new_showing = {k: v for k, v in self._showing.items() if k != setup}
+        if showing:
+            new_showing[setup] = dict(showing)
+        if not write_json(self._file, self._data(entries, new_showing)):
             return -1  # not written: the last real save stays what Load uses
         self._entries, self._bound, self._showing = entries, bound, new_showing
         return count
@@ -472,7 +503,14 @@ class WindowLayout:
     def _write(self) -> bool:
         if self._unread and not self.retry_read(throttled=True):
             return False  # never written over a file not read yet: it would erase what it holds
-        return write_json(self._file, {"Windows": [e.to_json() for e in self._entries], "Showing": self._showing})
+        return write_json(self._file, self._data())
+
+    def _data(self, entries: list[Entry] | None = None, showing: dict | None = None) -> dict:
+        """layout.json: {"Setups": [{"Displays": [...], "Windows": [...], "Showing": {...}}]}."""
+        setups = group_setups(self._entries if entries is None else entries, Entry.to_json)
+        for key, shown in (self._showing if showing is None else showing).items():
+            setups.setdefault(key, {"Displays": list(key), "Windows": []})["Showing"] = shown
+        return {"Setups": list(setups.values())}
 
     # ---- applying
 

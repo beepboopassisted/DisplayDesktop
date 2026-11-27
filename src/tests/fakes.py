@@ -48,6 +48,7 @@ class FakeWin:
             FakeScreen(r"\\.\DISPLAY2", (1920, 0, 3840, 1080), (1920, 0, 3840, 1040)),
         ]
         self.monitor_ids = {r"\\.\DISPLAY1": "MON-A", r"\\.\DISPLAY2": "MON-B"}
+        self.monitor_names: dict[str, str] = {}  # monitor path -> display name (default: the path)
         self.foreground = 0
         self.cursor_device = r"\\.\DISPLAY1"
         self.tick = 10_000_000
@@ -232,6 +233,10 @@ class FakeWin:
     def get_monitor_id(self, device):
         return self.monitor_ids.get(device, "")
 
+    def display_name(self, monitor_id):
+        """The display name of a monitor path (monitor_names, else the path itself)."""
+        return self.monitor_names.get(monitor_id, monitor_id)
+
     def get_work_area(self, device):
         for s in self.screen_list:
             if s.device == device:
@@ -326,6 +331,59 @@ class FakeWin:
     def process_started(self, pid):
         """A process's start time: unique to that process in that boot (0 = unknown pid)."""
         return (getattr(self, "boots", 0) + 1) * 10**12 + pid if pid else 0
+
+
+# ---- data files (layout/places/showing.json: grouped by display setup)
+
+SETUP = ("MON-A", "MON-B")  # FakeWin's two monitors' display names (display_name: the path itself)
+
+
+def layout_data(windows=(), showing=None, displays=SETUP) -> dict:
+    """layout.json holding one setup: its saved windows and shown desktops."""
+    s = {"Displays": sorted(displays), "Windows": list(windows)}
+    if showing is not None:
+        s["Showing"] = dict(showing)
+    return {"Setups": [s]}
+
+
+def places_data(windows=(), desktops=None, displays=SETUP, **top) -> dict:
+    """places.json holding one setup (top: Updated, UptimeMs)."""
+    s = {"Displays": sorted(displays), "Windows": list(windows)}
+    if desktops is not None:
+        s["Desktops"] = dict(desktops)
+    return {**top, "Setups": [s]}
+
+
+def showing_data(showing, displays=SETUP) -> dict:
+    """showing.json holding one setup."""
+    return {"Setups": [{"Displays": sorted(displays), "Showing": dict(showing)}]}
+
+
+def setup_of(data: dict, displays=SETUP) -> dict:
+    """The object of one setup in a layout/places/showing file ({} if it has none)."""
+    want = sorted(displays)
+    return next((s for s in data.get("Setups") or [] if sorted(s.get("Displays") or []) == want), {})
+
+
+def all_windows(data: dict) -> list:
+    """Every setup's Windows of a read layout/places file, in file order."""
+    return [e for s in data.get("Setups") or [] for e in s.get("Windows") or []]
+
+
+def all_showing(data: dict) -> dict:
+    """Every setup's Showing of a read layout/showing file, merged (display name -> desktop)."""
+    out = {}
+    for s in data.get("Setups") or []:
+        out.update(s.get("Showing") or {})
+    return out
+
+
+def all_desktops(data: dict) -> dict:
+    """Every setup's Desktops of a read places file, merged (display name -> count)."""
+    out = {}
+    for s in data.get("Setups") or []:
+        out.update(s.get("Desktops") or {})
+    return out
 
 
 class FakeSnapshots:

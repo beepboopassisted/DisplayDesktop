@@ -32,6 +32,11 @@ def read(folder, name):
         return fh.read()
 
 
+def own(name: str) -> str:
+    """The test's own data file `name` (in the current format: never upgraded when read)."""
+    return f'{{"file":"{name}","Format":{paths.FORMAT}}}'
+
+
 def missing_drive() -> str:
     used = {d for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")}
     return next(d for d in reversed(string.ascii_uppercase) if d not in used)
@@ -59,7 +64,7 @@ class Folder(unittest.TestCase):
         self.addCleanup(DF._store, None)
         self.addCleanup(DF._set_value, DF.LEFT_JOURNAL, None)
         for name in DF.MOVED:
-            write(self.default, name, f'{{"file":"{name}"}}')
+            write(self.default, name, own(name))
 
     def stored(self):
         try:
@@ -86,7 +91,7 @@ class Folder(unittest.TestCase):
         self.assertTrue(DF.same(DF.current(), self.other))
         self.assertEqual(self.stored(), new)
         for name in DF.MOVED:
-            self.assertEqual(read(self.other, name), f'{{"file":"{name}"}}')
+            self.assertEqual(read(self.other, name), own(name))
         self.assertFalse(os.path.exists(self.default), "the old folder was empty: removed")
 
     def test_an_old_folder_with_other_files_is_kept(self):
@@ -108,7 +113,7 @@ class Folder(unittest.TestCase):
         write(self.other, "display.desktop.settings.json", '{"old":true}')
         write(self.other, "photo.jpg", "x")
         DF.move_to(self.other)
-        self.assertEqual(read(self.other, "display.desktop.settings.json"), '{"file":"display.desktop.settings.json"}')
+        self.assertEqual(read(self.other, "display.desktop.settings.json"), own("display.desktop.settings.json"))
         self.assertTrue(os.path.isfile(os.path.join(self.other, "photo.jpg")))
 
     def test_the_same_folder_changes_nothing(self):
@@ -210,7 +215,7 @@ class Folder(unittest.TestCase):
         write(self.other, "display.desktop.layout.json", '{"theirs":true}')
         DF.move_to(self.other)
         self.assertFalse(os.path.exists(os.path.join(self.other, "display.desktop.settings.json")), "yours: all defaults")
-        self.assertEqual(read(self.other, "display.desktop.layout.json"), '{"file":"display.desktop.layout.json"}')
+        self.assertEqual(read(self.other, "display.desktop.layout.json"), own("display.desktop.layout.json"))
 
     def test_a_failed_copy_leaves_files_already_there_untouched(self):
         write(self.other, "display.desktop.layout.json", '{"theirs":true}')
@@ -301,7 +306,7 @@ class Folder(unittest.TestCase):
             self.assertTrue(paths.write_json(target, {"ok": 1}))
         wait.assert_called_once_with(paths.RETRY_DELAYS_S[0])  # (the short wait, not slept here)
         self.assertEqual(reported, [], "no error for a lock that passes")
-        self.assertEqual(read(self.default, PLACES_FILE), '{"ok":1,"Format":1}')
+        self.assertEqual(read(self.default, PLACES_FILE), '{"ok":1,"Format":2}')
 
     def test_a_folder_with_files_that_cant_be_read_is_never_switched_to(self):
         from src import settings_window as SW
@@ -342,7 +347,7 @@ class Folder(unittest.TestCase):
         DF.move_to(self.other)
         self.assertFalse(os.path.exists(os.path.join(self.other, LAYOUT_FILE)), "never copied")
         self.assertTrue(os.path.exists(os.path.join(self.default, LAYOUT_FILE)), "nor deleted: left as it is")
-        self.assertEqual(read(self.other, SETTINGS_FILE), '{"file":"%s"}' % SETTINGS_FILE, "the others moved")
+        self.assertEqual(read(self.other, SETTINGS_FILE), own(SETTINGS_FILE), "the others moved")
 
     def test_a_failed_move_removes_every_folder_it_made(self):
         deep = os.path.join(self.tmp, "a", "b", "c")
@@ -374,7 +379,7 @@ class Folder(unittest.TestCase):
         self.assertIn("Use the settings in that folder?", text)
 
     def test_both_folders_with_data_asks_which_to_keep(self):
-        write(self.other, "display.desktop.layout.json", '{"Windows":[],"Showing":{}}')
+        write(self.other, "display.desktop.layout.json", '{"Setups":[],"Format":2}')
         from src import settings_window as SW
         keep, text, flags = self.choose(self.other, 6)
         self.assertIs(keep, True, "Yes: that folder's")
@@ -396,11 +401,12 @@ class Folder(unittest.TestCase):
                 mock.patch.object(DF.os, "makedirs", side_effect=[OSError("not yet"), None]):
             paths.data_dir()  # the run falls back to the default folder
         self.assertTrue(DF.same(DF.unreachable, gone))
-        write(gone, "display.desktop.layout.json", '{"Windows":[{"Exe":"x"}],"Showing":{}}')  # the user's Save
+        saved = '{"Setups":[{"Displays":["MON-A"],"Windows":[{"Exe":"x"}]}],"Format":2}'
+        write(gone, "display.desktop.layout.json", saved)  # the user's Save
         keep, text, _ = self.choose(gone, 6)
         self.assertIs(keep, True, "no question of replacing it: its data is the real one")
         DF.move_to(gone, keep_new=True)
-        self.assertEqual(read(gone, "display.desktop.layout.json"), '{"Windows":[{"Exe":"x"}],"Showing":{}}')
+        self.assertEqual(read(gone, "display.desktop.layout.json"), saved)
         self.assertTrue(DF.same(DF.current(), gone))
 
     def test_keeping_the_new_folders_data_copies_nothing_and_drops_the_old(self):
@@ -423,7 +429,7 @@ class Folder(unittest.TestCase):
         self.assertFalse(settings.get("UseGpu"), "while offline: the values known (no disk read)")
         DF.move_to(self.other)
         settings.write_if_missing()  # (the tray does this after the move)
-        self.assertEqual(read(self.other, "display.desktop.settings.json"), '{"StartMenu":true,"UseGpu":false,"Format":1}')
+        self.assertEqual(read(self.other, "display.desktop.settings.json"), '{"StartMenu":true,"UseGpu":false,"Format":2}')
 
     # ---- third review
 
@@ -863,7 +869,7 @@ class Folder(unittest.TestCase):
         self.assertEqual(len(tries), n, "tried again only after READ_RETRY_S")
 
     def test_a_folder_that_failed_elsewhere_still_shows_its_data(self):
-        write(self.other, "display.desktop.layout.json", '{"Windows":[]}')
+        write(self.other, "display.desktop.layout.json", '{"Setups":[],"Format":2}')
         paths.data_dir()
         paths.note_failure(self.other, gone=True)  # (e.g. looked for while it was offline)
         self.assertTrue(DF.has_data(self.other), "a move there must ask: its own data is there")
@@ -971,7 +977,7 @@ class Folder(unittest.TestCase):
             settings.write_if_missing()
         self.assertTrue(settings.get("StartMenu"), "still known, not read as the missing file's defaults")
         settings.flush()
-        self.assertEqual(read(self.default, "display.desktop.settings.json"), '{"StartMenu":true,"Format":1}')
+        self.assertEqual(read(self.default, "display.desktop.settings.json"), '{"StartMenu":true,"Format":2}')
 
     def test_our_journal_kept_in_the_folder_left_is_read_by_the_next_start(self):
         write(self.default, JOURNAL_FILE, '{"Windows":[]}')
@@ -1002,7 +1008,7 @@ class Folder(unittest.TestCase):
         paths._read_next.clear()  # (that long later)
         settings.flush()  # readable again: the change is merged in
         self.assertEqual(json.loads(read(self.default, "display.desktop.settings.json")),
-                         {"StartMenu": True, "UseGpu": False, "ShowConsole": True, "Format": 1})
+                         {"StartMenu": True, "UseGpu": False, "ShowConsole": True, "Format": 2})
 
     def test_a_settings_file_with_a_byte_order_mark_is_read(self):
         from src import settings
@@ -1022,13 +1028,13 @@ class Folder(unittest.TestCase):
         paths.data_dir()
         paths.note_failure(self.default, gone=True)
         settings.set("UseGpu", False)  # waiting to be written
-        write(self.other, "display.desktop.settings.json", '{"StartMenu":true}')
+        write(self.other, "display.desktop.settings.json", '{"StartMenu":true,"Format":2}')
         DF.move_to(self.other, keep_new=True)
         self.assertTrue(DF.kept_new)
         settings.forget()  # (what the tray does after such a move)
         self.assertTrue(settings.get("UseGpu"), "that folder's settings, not the old unwritten change")
         settings.flush()
-        self.assertEqual(read(self.other, "display.desktop.settings.json"), '{"StartMenu":true}')
+        self.assertEqual(read(self.other, "display.desktop.settings.json"), '{"StartMenu":true,"Format":2}')
 
     def test_default_in_a_fallback_run_forgets_the_unreachable_folder(self):
         gone = f"{missing_drive()}:\\Gone\\DisplayDesktop"

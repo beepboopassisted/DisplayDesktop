@@ -33,12 +33,12 @@ class Settings(unittest.TestCase):
 
     def test_only_values_that_differ_from_the_default_are_stored(self):
         settings.set("StartMenu", True)
-        self.assertEqual(self.read(), '{"StartMenu":true,"Format":1}')
+        self.assertEqual(self.read(), '{"StartMenu":true,"Format":2}')
         settings.set("ShowConsole", True)
-        self.assertEqual(self.read(), '{"StartMenu":true,"ShowConsole":true,"Format":1}')
+        self.assertEqual(self.read(), '{"StartMenu":true,"ShowConsole":true,"Format":2}')
         self.assertEqual((settings.get("StartMenu"), settings.get("ShowConsole")), (True, True))
         settings.set("StartMenu", False)
-        self.assertEqual(self.read(), '{"ShowConsole":true,"Format":1}')
+        self.assertEqual(self.read(), '{"ShowConsole":true,"Format":2}')
         settings.set("ShowConsole", False)
         self.assertIsNone(self.read(), "all defaults: no file")
 
@@ -51,7 +51,7 @@ class Settings(unittest.TestCase):
 
     def test_use_gpu_off_is_stored_on_is_the_default(self):
         settings.set("UseGpu", False)
-        self.assertEqual(self.read(), '{"UseGpu":false,"Format":1}')
+        self.assertEqual(self.read(), '{"UseGpu":false,"Format":2}')
         self.assertFalse(settings.get("UseGpu"))
         settings.set("UseGpu", True)
         self.assertIsNone(self.read())
@@ -67,7 +67,7 @@ class Settings(unittest.TestCase):
         with open(self.file, "w", encoding="utf-8") as fh:
             fh.write("{not json")
         settings.set("StartMenu", True)
-        self.assertEqual(self.read(), '{"StartMenu":true,"Format":1}')
+        self.assertEqual(self.read(), '{"StartMenu":true,"Format":2}')
 
 
 class RepoLink(unittest.TestCase):

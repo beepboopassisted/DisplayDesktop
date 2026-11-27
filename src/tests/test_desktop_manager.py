@@ -17,7 +17,8 @@ from src.desktop_manager import MAX_DESKTOPS_PER_MONITOR, STARTUP_GRACE_MS, Desk
 from src.layout import title_hash
 from src.paths import JOURNAL_FILE, PLACES_FILE
 
-from fakes import FakeScreen, FakeSnapshots, FakeWin
+from fakes import (SETUP, FakeScreen, FakeSnapshots, FakeWin, all_desktops, all_showing, all_windows, layout_data,
+                   setup_of)
 from moving import move_active
 
 D1, D2 = r"\\.\DISPLAY1", r"\\.\DISPLAY2"
@@ -610,7 +611,7 @@ class Moving(Base):
         self.assertFalse(self.visible(b) or self.visible(c))
         self.assertEqual((len(self.switched), len(self.starting)), events, "not a switch: no switch event, no slide")
         with open(os.path.join(self.dir, "display.desktop.showing.json"), encoding="utf-8") as fh:
-            self.assertEqual(json.load(fh)["Showing"]["MON-A"], 2, "the new number is remembered")
+            self.assertEqual(all_showing(json.load(fh))["MON-A"], 2, "the new number is remembered")
 
     def test_empty_desktops_are_never_removed_by_themselves(self):
         a = self.win.add("A")
@@ -682,7 +683,7 @@ class Moving(Base):
         m.switch_to(D1, 2)
         m.delete_desktop(D1, 1)            # b joins desktop 1; c's desktop is now number 2
         with open(os.path.join(self.dir, "display.desktop.showing.json"), encoding="utf-8") as fh:
-            self.assertEqual(json.load(fh)["Showing"]["MON-A"], 1)
+            self.assertEqual(all_showing(json.load(fh))["MON-A"], 1)
         m.restore_all()
         m2 = self.manager()
         m2.sync()
@@ -693,7 +694,7 @@ class Moving(Base):
         m, a, b, c = self.three()
         m.swap_desktops(D1, 1, 2)
         with open(os.path.join(self.dir, PLACES_FILE), encoding="utf-8") as fh:
-            desks = sorted(e["Desktop"] for e in json.load(fh)["Windows"])
+            desks = sorted(e["Desktop"] for e in all_windows(json.load(fh)))
         self.assertEqual(desks, [0, 1, 2])
         m.restore_all()
         m2 = self.manager()
@@ -724,7 +725,7 @@ class SavedLayout(Base):
         m.load_desktops()
         self.assertFalse(os.path.exists(self.layout_file), "only Save/Clear write layout.json")
 
-    def test_save_format_matches_csharp(self):
+    def test_save_format(self):
         a = self.win.add("Doc - Editor", exe=r"C:\Apps\editor.exe", cls="EditorWnd")
         b = self.win.add("B", 1)
         self.win.foreground = a
@@ -734,16 +735,20 @@ class SavedLayout(Base):
         with open(self.layout_file, encoding="utf-8") as fh:
             raw = fh.read()
         data = json.loads(raw)
-        self.assertEqual(list(data), ["Windows", "Showing", "Format"])  # (C# keys, then the format number)
-        self.assertEqual(data["Showing"], {"MON-A": 1, "MON-B": 0})
-        e = next(x for x in data["Windows"] if x["Class"] == "EditorWnd")
-        self.assertEqual(list(e), ["Exe", "Class", "TitleHash", "MonitorId", "Desktop", "WorkLeft",
+        self.assertEqual(list(data), ["Setups", "Format"])  # (the setups, then the format number)
+        self.assertEqual(len(data["Setups"]), 1)
+        setup = data["Setups"][0]
+        self.assertEqual(list(setup), ["Displays", "Windows", "Showing"])
+        self.assertEqual(setup["Displays"], list(SETUP))
+        self.assertEqual(setup["Showing"], {"MON-A": 1, "MON-B": 0})
+        e = next(x for x in setup["Windows"] if x["Class"] == "EditorWnd")
+        self.assertEqual(list(e), ["Exe", "Class", "TitleHash", "Display", "Desktop", "WorkLeft",
                                    "WorkTop", "ShowCmd", "Left", "Top", "Right", "Bottom", "TitleParts"],
-                         "the C# version's keys unchanged and in order; the title parts come after them")
+                         "the keys in order; the title parts come after them")
         self.assertEqual(e["TitleHash"], title_hash("Doc - Editor"))
         self.assertEqual(e["TitleParts"], [title_hash("doc"), title_hash("editor")], "only hashes")
         self.assertEqual(e["Desktop"], 1)
-        self.assertEqual(e["MonitorId"], "MON-A")
+        self.assertEqual(e["Display"], "MON-A")
         self.assertNotIn("Doc - Editor", raw, "titles are stored only as a hash")
 
     def test_window_closed_and_reopened_opens_where_created(self):
@@ -814,10 +819,12 @@ class SavedLayout(Base):
         self.assertIn(b2, m2.desktops_of(D1)[0])
         self.win.screen_list.append(screen2)
         m2.sync()
+        self.win.advance(DM.SETUP_SETTLE_MS)  # (once the displays settle)
+        m2.sync()
         self.assertEqual(self.win.monitor_device_of_window(b2), D2)
         self.assertIn(b2, m2.desktops_of(D2)[0])
 
-    def test_displaced_window_moved_by_user_stays(self):
+    def test_displaced_window_moved_by_user_keeps_that_place_in_its_own_setup(self):
         b = self.win.add("B", 1)
         m = self.manager()
         m.sync()
@@ -829,25 +836,39 @@ class SavedLayout(Base):
         m2.sync()
         m2.sync()
         self.win.windows[b2].rect = (300, 300, 800, 800)  # the user moves it
+        self.win.advance(2000)  # (recorded: places.REFRESH_MS)
         m2.sync()
         self.win.screen_list.append(screen2)
         m2.sync()
-        self.assertEqual(self.win.monitor_device_of_window(b2), D1)
+        self.win.advance(DM.SETUP_SETTLE_MS)  # (once the displays settle)
+        m2.sync()
+        self.assertEqual(self.win.monitor_device_of_window(b2), D2, "both displays: their setup's place")
+        self.win.screen_list.pop(1)
+        m2.sync()
+        self.win.advance(DM.SETUP_SETTLE_MS)
+        m2.sync()
+        self.assertEqual(self.win.windows[b2].rect, (300, 300, 800, 800), "one display: where the user put it")
 
-    def test_save_keeps_memory_of_detached_monitor(self):
+    def test_save_keeps_the_save_of_the_setup_with_the_detached_monitor(self):
         a = self.win.add("A", 0)
         b = self.win.add("B", 1)
         m = self.manager()
         m.sync()
         self.save(m)
+        with open(self.layout_file, encoding="utf-8") as fh:
+            both = setup_of(json.load(fh))
+        self.assertEqual(sorted(e["Display"] for e in both["Windows"]), ["MON-A", "MON-B"])
+        self.assertEqual(both["Showing"], {"MON-A": 0, "MON-B": 0})
         self.win.close(b)
-        screen2 = self.win.screen_list.pop(1)
+        self.win.screen_list.pop(1)
         m.sync()
         self.save(m)
         with open(self.layout_file, encoding="utf-8") as fh:
             data = json.load(fh)
-        self.assertEqual(sorted(e["MonitorId"] for e in data["Windows"]), ["MON-A", "MON-B"])
-        self.assertEqual(data["Showing"], {"MON-A": 0, "MON-B": 0})
+        self.assertEqual(setup_of(data), both, "the two-monitor setup's save: unchanged")
+        one = setup_of(data, ("MON-A",))
+        self.assertEqual([e["Display"] for e in one["Windows"]], ["MON-A"], "this setup: the windows where they are now")
+        self.assertEqual(one["Showing"], {"MON-A": 0})
 
     def test_clear_desktops(self):
         a = self.win.add("A")
@@ -861,7 +882,7 @@ class SavedLayout(Base):
         self.assertEqual(sorted(m.desktops_of(D1)[0]), sorted([a, b]))
         self.assertTrue(self.visible(a) and self.visible(b))
         with open(self.layout_file, encoding="utf-8") as fh:
-            self.assertEqual(json.load(fh), {"Windows": [], "Showing": {}, "Format": 1})
+            self.assertEqual(json.load(fh), {"Setups": [], "Format": 2})
         self.assertIsNone(self.journal)
 
     def test_load_desktops_reapplies(self):
@@ -942,7 +963,7 @@ class SameNameWindows(Base):
         m.switch_to(D2, 0)
         self.assertEqual(m.save_desktops(), 5, "all five windows are saved")
         with open(self.layout_file, encoding="utf-8") as fh:
-            saved = json.load(fh)["Windows"]
+            saved = all_windows(json.load(fh))
         self.assertEqual(sorted(e["Desktop"] for e in saved if e["Class"] == "BrowserWindowClass2"),
                          [0, 1, 2], "three entries, one per look-alike window, although they look the same")
         self.assertEqual(sorted(e["Exe"] for e in saved if e["Class"] == "BrowserWindowClass"),
@@ -1046,7 +1067,7 @@ class LastKnownPlaces(Base):
     def test_recorded_automatically_without_titles(self):
         m, a, b, c = self.arrange()
         data = self.places()
-        self.assertEqual(sorted((e["MonitorId"], e["Desktop"]) for e in data["Windows"]),
+        self.assertEqual(sorted((e["Display"], e["Desktop"]) for e in all_windows(data)),
                          [("MON-A", 0), ("MON-A", 1), ("MON-B", 1)])
         self.assertNotIn("Alpha", json.dumps(data), "titles are stored only as a hash")
         self.assertFalse(os.path.exists(self.layout_file), "the saved desktops are not touched")
@@ -1095,8 +1116,8 @@ class LastKnownPlaces(Base):
         self.win.advance(500)                             # ...less than 2 s ago: not recorded yet
         m.sync()
         self.assertNotEqual(self.win.windows[b].rect, next(
-            (e["Left"], e["Top"], e["Right"], e["Bottom"]) for e in self.places()["Windows"] if e["Desktop"] == 1
-            and e["MonitorId"] == "MON-A"))
+            (e["Left"], e["Top"], e["Right"], e["Bottom"]) for e in all_windows(self.places()) if e["Desktop"] == 1
+            and e["Display"] == "MON-A"))
         self.quit(m)
         m2 = self.manager()
         self.win.windows[b].rect = (0, 0, 640, 480)  # wherever it is when DisplayDesktop starts again
@@ -1145,7 +1166,7 @@ class LastKnownPlaces(Base):
         m.sync()
         self.win.advance(61_000)  # well before DisplayDesktop stops
         m.sync()
-        self.assertEqual(len(self.places()["Windows"]), 2, "its place is forgotten")
+        self.assertEqual(len(all_windows(self.places())), 2, "its place is forgotten")
         m.restore_all()
         m2 = self.manager()
         b2 = self.win.add("Beta", 0, exe=r"C:\Apps\beta.exe", rect=(300, 300, 700, 700))
@@ -1183,10 +1204,10 @@ class LastKnownPlaces(Base):
         self.win.reboot()
         m2 = self.manager()
         m2.sync()
-        self.assertEqual(len(self.places()["Windows"]), 3, "kept while the apps may still open")
+        self.assertEqual(len(all_windows(self.places())), 3, "kept while the apps may still open")
         self.win.advance(STARTUP_GRACE_MS + 1)
         m2.sync()
-        self.assertEqual(self.places()["Windows"], [])
+        self.assertEqual(all_windows(self.places()), [])
         a2, b2, c2 = self.reopen()
         m2.sync()
         self.assertEqual(self.where(m2, b2), (D1, 0))
@@ -1258,7 +1279,7 @@ class LastKnownPlaces(Base):
 
     def test_positions_are_recorded_every_2_seconds(self):
         m, a, b, c = self.arrange()
-        pos = lambda: next(e for e in self.places()["Windows"] if e["MonitorId"] == "MON-A" and e["Desktop"] == 0)  # noqa: E731
+        pos = lambda: next(e for e in all_windows(self.places()) if e["Display"] == "MON-A" and e["Desktop"] == 0)  # noqa: E731
         self.assertEqual((pos()["Left"], pos()["Top"]), (10, 20))
         self.win.windows[a].rect = (400, 300, 1000, 800)  # the user moves a (same desktop)
         self.win.advance(1_000)
@@ -1289,10 +1310,10 @@ class LastKnownPlaces(Base):
         self.assertEqual(self.where(m, a), (D1, 0))
         after = self.places()
         # ...which is recorded as its last known place, like any move; Load itself reads nothing here
-        self.assertEqual(sorted(e["Desktop"] for e in after["Windows"] if e["MonitorId"] == "MON-A"), [0, 1])
-        self.assertNotEqual(before["Windows"], after["Windows"])
+        self.assertEqual(sorted(e["Desktop"] for e in all_windows(after) if e["Display"] == "MON-A"), [0, 1])
+        self.assertNotEqual(all_windows(before), all_windows(after))
         with open(self.layout_file, encoding="utf-8") as fh:
-            self.assertEqual(len(json.load(fh)["Windows"]), 3)
+            self.assertEqual(len(all_windows(json.load(fh))), 3)
 
     def test_unreadable_file_is_ignored(self):
         m, a, b, c = self.arrange()
@@ -1336,7 +1357,9 @@ class BrowsersBySite(Base):
         m.sync()
         m.restore_all()
         self.win.reboot()
-        return self.manager()
+        m2 = self.manager()
+        m2._places.use_setup(SETUP, {})  # (the setup the first sync picks: tests call assign before any)
+        return m2
 
     BEFORE = {
         "Inbox (3) - Webmail - Web Browser": (0, 0),
@@ -1462,8 +1485,8 @@ class ThreeOfAKind(Base):
 
     def recorded(self):
         with open(os.path.join(self.dir, PLACES_FILE), encoding="utf-8") as fh:
-            return sorted(((e["MonitorId"], e["Desktop"]), (e["Left"], e["Top"], e["Right"], e["Bottom"]), e["ShowCmd"])
-                          for e in json.load(fh)["Windows"])
+            return sorted(((e["Display"], e["Desktop"]), (e["Left"], e["Top"], e["Right"], e["Bottom"]), e["ShowCmd"])
+                          for e in all_windows(json.load(fh)))
 
     def expect_recorded(self, m, wins, note):
         ids = {D1: "MON-A", D2: "MON-B"}
@@ -1654,7 +1677,7 @@ class LastShownDesktop(Base):
         if not os.path.exists(self.showing_file):
             return None
         with open(self.showing_file, encoding="utf-8") as fh:
-            return json.load(fh)["Showing"]
+            return setup_of(json.load(fh)).get("Showing")  # (the two-monitor setup's)
 
     def three_desktops(self):
         """c on desktop 1, a on desktop 2, b on desktop 3 (showing); saved with desktop 3 showing."""
@@ -2232,19 +2255,31 @@ class SnapshotWorker(unittest.TestCase):
 
 
 class Layout(Base):
-    def test_csharp_layout_file_is_read(self):
-        csharp = ('{"Windows":[{"Exe":"C:\\\\Apps\\\\app.exe","Class":"AppWindow","TitleHash":"%s",'
-                  '"MonitorId":"MON\\u0026A","Desktop":1,"WorkLeft":0,"WorkTop":0,"ShowCmd":1,'
-                  '"Left":5,"Top":6,"Right":705,"Bottom":606}],"Showing":{"MON\\u0026A":1}}'
-                  % title_hash("Hello"))
-        with open(self.layout_file, "w", encoding="utf-8") as fh:
-            fh.write(csharp)
-        self.win.monitor_ids[D1] = "MON&A"
+    def test_format_1_places_read_as_empty_and_format_1_settings_keep_their_values(self):
+        from src import paths
+        from src.paths import SETTINGS_FILE, SHOWING_FILE
+        entry = ('{"Exe":"C:\\\\Apps\\\\app.exe","Class":"AppWindow","TitleHash":"%s","MonitorId":"MON-A",'
+                 '"Desktop":1,"WorkLeft":0,"WorkTop":0,"ShowCmd":1,"Left":5,"Top":6,"Right":705,"Bottom":606}'
+                 % title_hash("Hello"))
+        files = {  # (the C# version's layout.json has no number; the others are written as format 1)
+            os.path.basename(self.layout_file): '{"Windows":[%s],"Showing":{"MON-A":1}}' % entry,
+            PLACES_FILE: '{"Updated":1,"UptimeMs":1,"Desktops":{"MON-A":3},"Windows":[%s],"Format":1}' % entry,
+            SHOWING_FILE: '{"Showing":{"MON-A":2},"Format":1}',
+            SETTINGS_FILE: '{"StartMenu":true,"Format":1}',
+        }
+        for name, text in files.items():
+            with open(os.path.join(self.dir, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
         m = self.manager()
-        a = self.win.add("Hello")
-        m.load_desktops()
-        self.assertIn(a, m.desktops_of(D1)[1])
-        self.assertEqual(self.win.windows[a].rect, (5, 6, 705, 606))
+        a = self.win.add("Hello", rect=(300, 300, 900, 900))
+        m.sync()
+        self.assertEqual(m.desktops_of(D1), [[a]], "no desktops nor places from format 1")
+        self.assertEqual(m.current_of(D1), 0)
+        self.assertEqual(m.load_desktops(), 0, "nothing saved")
+        self.assertEqual(m.desktops_of(D1), [[a]])
+        self.assertEqual(self.win.windows[a].rect, (300, 300, 900, 900), "not moved")
+        self.assertEqual(paths.read_json(os.path.join(self.dir, SETTINGS_FILE)), {"StartMenu": True},
+                         "settings: the same in format 2")
 
     def test_unreadable_layout_is_ignored(self):
         with open(self.layout_file, "w") as fh:
@@ -2300,29 +2335,33 @@ class PlacesWrites(Base):
         self.win.windows[a].rect = (150, 120, 950, 720)
         self.run_syncs(m, 4)
         self.assertEqual(len(self.written), 1, "moved: written once")
-        rec = {w["Handle"]: w for w in self.written[-1]["Windows"]}
+        rec = {w["Handle"]: w for w in all_windows(self.written[-1])}
         self.assertEqual((rec[a]["Left"], rec[a]["Top"], rec[a]["Right"], rec[a]["Bottom"]), (150, 120, 950, 720))
-        self.assertEqual(set(self.written[-1]), {"Updated", "UptimeMs", "Desktops", "Windows"})
-        self.assertEqual(set(rec[b]), {"Exe", "Class", "TitleHash", "MonitorId", "Desktop", "WorkLeft", "WorkTop",
+        self.assertEqual(set(self.written[-1]), {"Updated", "UptimeMs", "Setups"})
+        self.assertEqual(len(self.written[-1]["Setups"]), 1)
+        self.assertEqual(set(self.written[-1]["Setups"][0]), {"Displays", "Windows", "Desktops"})
+        self.assertEqual(self.written[-1]["Setups"][0]["Displays"], list(SETUP))
+        self.assertEqual(set(rec[b]), {"Exe", "Class", "TitleHash", "Display", "Desktop", "WorkLeft", "WorkTop",
                                        "ShowCmd", "Left", "Top", "Right", "Bottom", "TitleParts", "Closed", "Handle",
                                        "Pid"})
-        self.assertEqual(self.written[-1]["Desktops"], {"MON-A": 1, "MON-B": 1})
+        self.assertEqual(all_desktops(self.written[-1]), {"MON-A": 1, "MON-B": 1})
         self.win.windows[b].title = "Changed - App"
         self.run_syncs(m, 4)
         self.assertEqual(len(self.written), 2, "a new title: written")
-        self.assertEqual({w["Handle"]: w["TitleHash"] for w in self.written[-1]["Windows"]}[b], title_hash("Changed - App"))
+        self.assertEqual({w["Handle"]: w["TitleHash"] for w in all_windows(self.written[-1])}[b],
+                         title_hash("Changed - App"))
         self.win.windows[a].show_cmd = 3
         self.run_syncs(m, 4)
         self.assertEqual(len(self.written), 3, "maximized: written")
         self.new_desktop(m)
-        self.assertEqual(self.written[-1]["Desktops"], {"MON-A": 2, "MON-B": 1}, "a desktop added: written")
+        self.assertEqual(all_desktops(self.written[-1]), {"MON-A": 2, "MON-B": 1}, "a desktop added: written")
         count = len(self.written)
         self.run_syncs(m, 4)
         self.assertEqual(len(self.written), count, "then nothing again")
         self.win.close(b)
         m.sync()
         self.assertEqual(len(self.written), count + 1, "closed: written (kept as closed)")
-        self.assertTrue({w["Handle"]: w for w in self.written[-1]["Windows"]}[b]["Closed"] > 0)
+        self.assertTrue({w["Handle"]: w for w in all_windows(self.written[-1])}[b]["Closed"] > 0)
 
     def test_the_heartbeat_and_a_forced_write_write_unchanged_places(self):
         self.win.add("Doc - App", 0)
@@ -2355,7 +2394,7 @@ class PlacesWrites(Base):
         self.assertEqual(self.written, [])
         self.run_syncs(m, 4)
         self.assertEqual(len(self.written), 1, "not written then: written now, nothing else changed")
-        self.assertEqual(self.written[0]["Windows"][0]["Left"], 150)
+        self.assertEqual(all_windows(self.written[0])[0]["Left"], 150)
 
 
 if __name__ == "__main__":

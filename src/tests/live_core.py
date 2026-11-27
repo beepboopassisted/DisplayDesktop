@@ -24,6 +24,7 @@ from src import native as N  # noqa: E402
 from src.desktop_manager import DesktopManager  # noqa: E402
 from src.paths import JOURNAL_FILE  # noqa: E402
 from src.testing import ScopedWin  # noqa: E402
+from fakes import all_showing, all_windows  # noqa: E402
 from moving import move_window  # noqa: E402
 
 N.enable_per_monitor_dpi()
@@ -269,9 +270,9 @@ def main() -> int:
         check(n == 3, f"save: 3 windows saved (got {n})")
         with open(os.path.join(tmp, "display.desktop.layout.json"), encoding="utf-8") as fh:
             lay = json.load(fh)
-        check(lay["Showing"].get(N.get_monitor_id(dev)) == 0 and len(lay["Windows"]) == 3,
+        check(all_showing(lay).get(mgr._monitor_ids.get(dev)) == 0 and len(all_windows(lay)) == 3,
               "display.desktop.layout.json: 3 entries and the shown desktop")
-        check(all("WS Test" not in json.dumps(e) for e in lay["Windows"]), "display.desktop.layout.json holds no titles")
+        check(all("WS Test" not in json.dumps(e) for e in all_windows(lay)), "display.desktop.layout.json holds no titles")
 
         N.set_window_pos(alpha, primary.work[0] + 600, primary.work[1] + 400, 500, 400,
                          N.SWP_NOZORDER | N.SWP_NOACTIVATE)
@@ -388,7 +389,7 @@ def main() -> int:
         # --- clear
         mgr3.clear_desktops()
         with open(os.path.join(tmp, "display.desktop.layout.json"), encoding="utf-8") as fh:
-            check(json.load(fh) == {"Windows": [], "Showing": {}, "Format": 1}, "clear desktops erases the saved layout")
+            check(json.load(fh) == {"Setups": [], "Format": 2}, "clear desktops erases the saved layout")
     finally:
         for m in managers:
             m.restore_all()

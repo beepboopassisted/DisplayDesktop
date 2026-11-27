@@ -22,7 +22,7 @@ from collections.abc import Callable
 
 from . import native as N
 from .last_shown import LastShown
-from .layout import Entry, Place, WindowLayout
+from .layout import Entry, Place, WindowLayout, setup_key
 from .places import REFRESH_MS, WindowPlaces, same_boot
 from . import datafolder, paths
 from .paths import JOURNAL_FILE, data_dir, is_int, write_json
@@ -30,6 +30,7 @@ from .paths import JOURNAL_FILE, data_dir, is_int, write_json
 MAX_DESKTOPS_PER_MONITOR = 10  # a safety cap (a damaged file cannot create thousands of desktops)
 STARTUP_GRACE_MS = 120_000
 MONITOR_ID_REFRESH_MS = 30_000
+SETUP_SETTLE_MS = 2000  # displays attached or detached: their setup's places apply once unchanged this long
 CAPTURE_BUDGET_MS = 50  # previews captured per switch at most this long (only windows without one)
 PREVIEW_FRESH_S = 5.0  # a window in use gets a new background preview at most this often
 PREVIEW_MAX_AGE_S = 60.0  # any shown window's preview is taken again in the background when older
@@ -69,6 +70,22 @@ class MonitorState:
         self.pending_show = -1
         self.pending_until = 0
         self.work = (0, 0, 0, 0)  # last known work area (its windows are moved from here if unplugged)
+        self.path = ""  # the monitor's device interface path: the state follows it when \\.\DISPLAYn names change
+
+
+def display_names(screens, monitor_paths: dict[str, str], name_of) -> dict[str, str]:
+    """Device -> display name (native.display_name of its monitor path). Displays with the same
+    name get " (2)", " (3)"... left to right, then top to bottom. "" when the monitor is unknown."""
+    out: dict[str, str] = {}
+    seen: dict[str, int] = {}
+    for s in sorted(screens, key=lambda s: (s.bounds[0], s.bounds[1])):
+        base = name_of(monitor_paths.get(s.device, ""))
+        if not base:
+            out[s.device] = ""
+            continue
+        n = seen[base] = seen.get(base, 0) + 1
+        out[s.device] = base if n == 1 else f"{base} ({n})"
+    return out
 
 
 class Displaced:
@@ -182,7 +199,11 @@ class DesktopManager:
         self._own_pid = os.getpid()
         # This manager, as written into its journal: one read back after a folder move is not a crash's
         self._writer = f"{self._own_pid}-{os.urandom(16).hex()}"  # (32 random hex digits; no uuid module)
-        self._monitor_ids: dict[str, str] = {}
+        self._monitor_ids: dict[str, str] = {}  # device -> display name (the files' key)
+        self._monitor_paths: dict[str, str] = {}  # device -> monitor device interface path
+        self._setup: tuple | None = None  # display setup places and showing use (None: before the first sync)
+        self._setup_due = False  # displays attached or detached: _apply_setup once they settle
+        self._setup_changed_at = 0  # tick of the last change
         self._screens_key: tuple = ()  # display setup the monitor ids were read for
         self._ids_read_at = -10**12     # tick of that read
         self._displaced: dict[int, Displaced] = {}
@@ -247,6 +268,92 @@ class DesktopManager:
                     return st, i
         return None
 
+    def _follow_monitors(self, devices: list[str]) -> list[MonitorState]:
+        """Display names (\\\\.\\DISPLAYn) can move to other monitors when one is attached: each
+        monitor's desktops follow the monitor (its device path), never the name. Returns the states
+        of monitors no longer attached."""
+        paths_ = self._monitor_paths
+        old = self._monitors
+        by_path = {st.path: st for st in old.values() if st.path}
+        new: dict[str, MonitorState] = {}
+        taken: set[int] = set()
+        for dev in devices:
+            p = paths_.get(dev, "")
+            st = by_path.get(p) if p else None
+            if st is None:
+                same = old.get(dev)  # (a monitor whose path can't be read: kept by its device name)
+                if same is not None and (not same.path or not p) and id(same) not in taken:
+                    st = same
+            if st is None or id(st) in taken:
+                continue
+            taken.add(id(st))
+            st.device = dev
+            st.path = p or st.path
+            new[dev] = st
+        self._monitors = new
+        return [st for st in old.values() if id(st) not in taken]
+
+    def _use_setup(self, setup: tuple) -> None:
+        """The display setup the last known places and shown desktops are read and recorded for."""
+        self._setup = setup
+        self._layout.use_setup(setup, self._monitor_ids)
+        self._places.use_setup(setup, self._monitor_ids)
+        self._last_shown.use_setup(setup)
+
+    def _apply_setup(self) -> None:
+        """Displays were attached or detached and have settled: the last known places of this
+        display setup apply. Each display gets its desktops back and shows the desktop it showed
+        last in this setup; every window recorded there goes back to its display, desktop and
+        position. Nothing vanishes unasked: the window in use stays in view (on its recorded
+        display), and windows with no place in this setup move along with their display's switch."""
+        self._setup_due = False
+        self._use_setup(setup_key(self._monitor_ids.values()))
+        self._places_signature = None  # (recorded at once, in this setup)
+        w = self._win
+        names = self._monitor_ids
+        final: dict[str, int] = {}
+        for dev, st in self._monitors.items():
+            st.pending_show = -1
+            name = names.get(dev, "")
+            for _ in range(min(self._places.desktop_count(name), MAX_DESKTOPS_PER_MONITOR) - len(st.desktops)):
+                self._add_desktop(st)
+            shown = self._last_shown.get(name)
+            final[dev] = min(shown, len(st.desktops) - 1) if shown is not None and shown >= 0 else st.current
+        managed = [h for st in self._monitors.values() for s in st.desktops for h in s]
+        todo = [h for h in managed if w.is_window(h) and not w.is_hung(h)]
+        pairs = self._places.assign_setup(todo) if todo else []
+        fg = w.get_foreground()
+        placed = []
+        for h, e in pairs:
+            dev = self._device_of_monitor_id(e.Display)
+            st = self._monitors.get(dev) if dev is not None else None
+            if st is None:
+                continue
+            if h == fg and min(max(e.Desktop, 0), MAX_DESKTOPS_PER_MONITOR - 1) != final[dev]:
+                e = Entry(**{k: getattr(e, k) for k in Entry.__slots__})
+                e.Desktop = final[dev]  # (the window in use: in view, on the desktop its display shows)
+            placed.append((h, e, st))
+        hiding = self._pass_hide_context()
+        self._journal_pass(hiding, [h for h, e, st in placed if self._goes_hidden(e, st)])
+        matched: set[int] = set()
+        for h, e, st in placed:
+            if self._place_at(h, e, st, hiding):
+                matched.add(h)
+                self._displaced.pop(h, None)
+        for dev, st in list(self._monitors.items()):
+            target = final.get(dev, st.current)
+            if target == st.current or target >= len(st.desktops):
+                continue
+            cur, dst = st.desktops[st.current], st.desktops[target]
+            for h in [h for h in cur if h not in matched and h not in self._hidden]:
+                del cur[h]
+                dst[h] = None  # (no place here: it stays in view, on the desktop shown now)
+            if fg in dst:
+                st.last_active[target] = fg
+            self._switch_to_core(st, target, remember=False)
+        if fg and fg != w.get_foreground() and w.is_window(fg) and fg not in self._hidden and w.is_window_visible(fg):
+            w.set_foreground(fg)  # (the switches gave focus to their desktops' windows: it stays with the one in use)
+
     def _restore(self, windows: list[int], store: WindowLayout) -> None:
         """Puts windows back on their monitor, desktop and position, where the store (last known
         places at startup, saved desktops on "Load") has a place for them; the others are
@@ -260,7 +367,7 @@ class DesktopManager:
         hiding = self._pass_hide_context()
         pairs = list(store.assign(todo))
         self._journal_pass(hiding, [h for h, e in pairs
-                                    if self._goes_hidden(e, self._monitors.get(self._device_of_monitor_id(e.MonitorId)))])
+                                    if self._goes_hidden(e, self._monitors.get(self._device_of_monitor_id(e.Display)))])
         for h, entry in pairs:
             self._place_entry(h, entry, hiding)
 
@@ -300,7 +407,7 @@ class DesktopManager:
         return _Lazy(lambda: _HideContext(self._floating_window_map()))
 
     def _place_entry(self, h: int, entry: Entry, hiding: _Lazy) -> None:
-        dev = self._device_of_monitor_id(entry.MonitorId)
+        dev = self._device_of_monitor_id(entry.Display)
         st = self._monitors.get(dev) if dev is not None else None
         if st is None:
             self._displaced[h] = Displaced(entry)
@@ -360,13 +467,13 @@ class DesktopManager:
         hiding = self._pass_hide_context()
         self._journal_pass(hiding, [h for h, d in self._displaced.items()
                                     if w.is_window(h) and not w.is_hung(h) and self._goes_hidden(
-            d.entry, self._monitors.get(self._device_of_monitor_id(d.entry.MonitorId)))])
+            d.entry, self._monitors.get(self._device_of_monitor_id(d.entry.Display)))])
         for h, d in list(self._displaced.items()):
             if not w.is_window(h):
                 self._displaced.pop(h, None)  # closed while waiting: free its entry
                 self._layout.unbind(h)
                 continue
-            dev = self._device_of_monitor_id(d.entry.MonitorId)
+            dev = self._device_of_monitor_id(d.entry.Display)
             origin = self._monitors.get(dev) if dev is not None else None
             if origin is not None:
                 if self._place_at(h, d.entry, origin, hiding):
@@ -386,8 +493,9 @@ class DesktopManager:
     def _remember_shown(self, st: MonitorState) -> None:
         """Remembers the desktop the monitor shows now (showing.json), so DisplayDesktop goes back
         to it next time it starts. Only for changes the user makes, never for the desktop that
-        startup or "Load" brings back. Not after end()."""
-        if self._ended:
+        startup or "Load" brings back. Not after end(), nor while displays settle (the setup it
+        belongs to is not known yet)."""
+        if self._ended or self._setup_due:
             return
         self._last_shown.set(self._monitor_ids.get(st.device, ""), st.current)
 
@@ -424,10 +532,9 @@ class DesktopManager:
             showing[mid] = st.current
             for i, s in enumerate(st.desktops):
                 for h in s:
-                    if w.is_window(h) and h not in self._displaced:
+                    if w.is_window(h):
                         windows.append(Place(h, mid, st.device, i))
-        attached = {i for i in self._monitor_ids.values() if i}
-        count = self._layout.save(windows, showing, attached)
+        count = self._layout.save(windows, showing)
         if count >= 0:
             for st in self._monitors.values():
                 if self._monitor_ids.get(st.device):
@@ -628,7 +735,11 @@ class DesktopManager:
         """places.json: recorded at once when a window opened, closed or moved to another desktop
         or monitor, and every REFRESH_MS (2 s) otherwise, so moved or resized windows are current
         too (the file is only written when something changed). During the startup grace time,
-        places of the last session that no window took yet are kept."""
+        places of the last session that no window took yet are kept. Nothing while displays settle
+        (attached or detached: Windows moves windows meanwhile; each setup keeps its own record)."""
+        if self._setup_due:
+            self._places.heartbeat()
+            return
         ids, displaced = self._monitor_ids, self._displaced
         rows = []  # (monitor id, desktop, window) of every window recorded (every sync: no Place objects)
         add = rows.append
@@ -641,10 +752,9 @@ class DesktopManager:
             counts[mid] = len(st.desktops)
             dev = st.device
             for i, s in enumerate(st.desktops):
-                for h in s:
-                    if h not in displaced:
-                        add((mid, i, h))
-                        devices.append(dev)
+                for h in s:  # (displaced ones too: this setup's place; their own setup keeps theirs)
+                    add((mid, i, h))
+                    devices.append(dev)
         signature = (tuple(rows), tuple(sorted(displaced)), tuple(sorted(counts.items())))
         grace = self._in_startup_grace
         if not grace and not self._places_grace_over:
@@ -1176,27 +1286,43 @@ class DesktopManager:
         # case a monitor was swapped for another without any visible change.
         key = tuple((s.device, s.bounds, s.hmon) for s in screens)
         tick = w.tick_count64()
+        gone_states: list[MonitorState] = []
         if key != self._screens_key or tick - self._ids_read_at >= MONITOR_ID_REFRESH_MS:
             self._screens_key, self._ids_read_at = key, tick
-            self._monitor_ids = {d: w.get_monitor_id(d) for d in current_devices}
+            self._monitor_paths = {d: w.get_monitor_id(d) for d in current_devices}
+            self._monitor_ids = display_names(screens, self._monitor_paths, w.display_name)
+            gone_states = self._follow_monitors(current_devices)
+            setup = setup_key(self._monitor_ids.values())
+            if self._setup is None:
+                self._use_setup(setup)  # (the first sync: the setup this run starts with)
+            elif setup != self._setup:
+                self._setup_due, self._setup_changed_at = True, tick
+        first = not self._monitors and not gone_states
 
         for dev in current_devices:
             if dev not in self._monitors:
-                # New monitor (app start or reconnect): as many desktops as it had (empty ones
-                # included), and show the desktop it showed last time
+                # New monitor. At start: as many desktops as it had (empty ones included), and the
+                # desktop it showed last time. Attached later: _apply_setup does that for the new
+                # setup once the displays settle (never a late switch hiding windows moved onto it)
                 st = MonitorState(dev)
-                for _ in range(min(self._places.desktop_count(self._monitor_ids[dev]), MAX_DESKTOPS_PER_MONITOR) - 1):
-                    self._add_desktop(st)
-                shown = self._last_shown.get(self._monitor_ids[dev])
-                if shown is not None and shown > 0:
-                    st.pending_show = min(shown, MAX_DESKTOPS_PER_MONITOR - 1)
-                    st.pending_until = w.tick_count64() + STARTUP_GRACE_MS
+                st.path = self._monitor_paths.get(dev, "")
+                if first:
+                    name = self._monitor_ids.get(dev, "")
+                    for _ in range(min(self._places.desktop_count(name), MAX_DESKTOPS_PER_MONITOR) - 1):
+                        self._add_desktop(st)
+                    shown = self._last_shown.get(name)
+                    if shown is not None and shown > 0:
+                        st.pending_show = min(shown, MAX_DESKTOPS_PER_MONITOR - 1)
+                        st.pending_until = w.tick_count64() + STARTUP_GRACE_MS
+                else:
+                    self._setup_due, self._setup_changed_at = True, tick
                 self._monitors[dev] = st
 
-        for dev in [d for d in self._monitors if d not in current_devices]:
+        gone_states += [self._monitors.pop(d) for d in [d for d in self._monitors if d not in current_devices]]
+        for gone in gone_states:
             # Display unplugged: every window that was on it (on any of its desktops) is shown and
             # moved onto the main display, where adoption below puts it on the current desktop
-            gone = self._monitors[dev]
+            self._setup_due, self._setup_changed_at = True, tick
             for s in gone.desktops:
                 for h in list(s):
                     # Keep track of where it belongs, so it can go back when the monitor returns
@@ -1208,7 +1334,10 @@ class DesktopManager:
                     self._move_to_main_display(h, gone.work, screens)
                     for c in floating:  # its palettes go with it
                         self._move_to_main_display(c, gone.work, screens)
-            del self._monitors[dev]
+        if self._ids_read_at == tick:
+            # Save / Load: the displays attached now (after the unplugged ones' windows took their
+            # saved places along as displaced)
+            self._layout.use_setup(setup_key(self._monitor_ids.values()), self._monitor_ids)
         for scr in screens:
             if scr.device in self._monitors:
                 self._monitors[scr.device].work = scr.work
@@ -1295,6 +1424,8 @@ class DesktopManager:
         for h in [h for h in self._show_later if h not in self._hidden]:
             del self._show_later[h]
 
+        if self._setup_due and w.tick_count64() - self._setup_changed_at >= SETUP_SETTLE_MS:
+            self._apply_setup()
         self._retry_refused_shows()
         self._show_saved_desktops()
         self._persist_hidden()

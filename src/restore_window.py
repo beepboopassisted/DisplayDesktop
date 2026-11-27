@@ -162,11 +162,15 @@ class _Dialog(G.Window):
         self._key_shown = not self._key_shown
         show_key(self._controls[ID_KEY], self._controls[ID_EYE], self._key_shown, self._face)
 
-    def _wrong_key(self) -> None:
+    def _wrong_key(self) -> bool:
+        """A key that doesn't open the files: says so and asks to try again (Retry / Cancel).
+        Returns whether to try again (the key box then has the focus, its text selected)."""
         _SetWindowTextW(self._controls[ID_STATUS], L.t("key.wrong"))
-        _MessageBeep(0x30)  # MB_ICONWARNING sound
-        G.SetFocus(self._controls[ID_KEY])
-        G.SendMessageW(self._controls[ID_KEY], 0x00B1, 0, -1)  # EM_SETSEL: all, ready to retype
+        again = G.message_box(L.t("key.retry"), G.MB_RETRYCANCEL | G.MB_ICONWARNING) == G.IDRETRY
+        if again and self.hwnd:
+            G.SetFocus(self._controls[ID_KEY])
+            G.SendMessageW(self._controls[ID_KEY], 0x00B1, 0, -1)  # EM_SETSEL: all, ready to retype
+        return again
 
     def _free_fonts(self) -> None:
         if getattr(self, "_eye_font", 0):
@@ -853,7 +857,8 @@ class KeyWindow(_Dialog):
             self.accepted = True
             self.destroy()
             return True
-        self._wrong_key()
+        if not self._wrong_key() and self.hwnd:
+            self.destroy()  # (not again: as Cancel)
         return False
 
     def on_message(self, msg, wp, lp):

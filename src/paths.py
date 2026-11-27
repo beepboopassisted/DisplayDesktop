@@ -136,9 +136,17 @@ def forget_failures(folder: str | None = None) -> None:
 # ours, a bad format), or of a NEWER format (a hacked file, or an older version installed again, e.g.
 # from a backup or on a new computer). The user is asked (tray: Quit, or delete the files and start
 # them fresh; never converted back or repaired); until answered it reads as damaged (ValueError).
-FORMAT = 1
+FORMAT = 2
 FORMAT_KEY = "Format"
-MIGRATIONS: dict[int, object] = {}  # format n -> fn(file name, data) returning that file's data in format n + 1
+
+
+def _from_1(name: str, data: dict) -> dict:
+    """Format 2 keeps windows, desktops and shown desktops per display setup (by display name):
+    format 1's (one list keyed by monitor path) start empty; settings and the journal are the same."""
+    return {} if name.lower() in (LAYOUT_FILE, PLACES_FILE, SHOWING_FILE) else data
+
+
+MIGRATIONS: dict[int, object] = {1: _from_1}  # format n -> fn(file name, data) returning that file's data in format n + 1
 on_unreadable = None  # called with a data file's path when it can't be read at all (tray: the question);
 # returns whether that question covers the file (the error then carries `asked = True`)
 kept: set[str] = set()  # normcased paths waiting for the Quit / Recreate Files answer: never written over
