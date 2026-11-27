@@ -1,76 +1,78 @@
-# IndepenDesk
+# DisplayDesktop
 
-**English** | [Türkçe](README.tr.md) | [Deutsch](README.de.md) | [Français](README.fr.md) | [Italiano](README.it.md) | [Русский](README.ru.md) | [中文](README.zh-CN.md) | [日本語](README.ja.md)
+**Give every screen its own desktops.** Per-monitor virtual desktops for Windows: flip through virtual desktops on the monitor you're working on while your other screens keep showing exactly what they were. Made for multi-monitor setups.
 
-**Independent virtual desktops per monitor for Windows** — the Windows counterpart of macOS "Displays have separate Spaces".
+![Per-monitor virtual desktops: each screen switches its own desktops](README.images/demo.gif)
 
-## The problem
-
-Windows virtual desktops are global: pressing `Win+Ctrl+←/→` switches **all monitors at once**. On macOS every display has its own Spaces and only the display under the cursor switches. IndepenDesk brings that behavior to Windows.
+<a href="README.images/tray-menu.png"><img src="README.images/tray-menu.png" alt="Tray menu" height="133"></a>&nbsp;&nbsp;&nbsp;<a href="README.images/settings.png"><img src="README.images/settings.png" alt="Settings" height="133"></a>&nbsp;&nbsp;&nbsp;<a href="README.images/recovery.png"><img src="README.images/recovery.png" alt="Recovery" height="133"></a>&nbsp;&nbsp;&nbsp;<a href="README.images/overview.png"><img src="README.images/overview.png" alt="Overview" height="133"></a>
 
 ## Features
 
-- 🖥 **Per-monitor desktops** — switching only affects the monitor under the mouse cursor; other monitors are untouched.
-- ➕ **Dynamic, independent desktop counts** — every monitor starts with 1 desktop; swiping right at the end creates a new one (up to 9 per monitor). Empty trailing desktops are removed automatically. One monitor can have 5 desktops while another has 2.
-- 🔢 **Global numbering** — desktop numbers continue across monitors (Monitor 1: 1-2-3, Monitor 2: 4-5-6). `Ctrl+Alt+digit` jumps to that desktop wherever it lives.
-- 🎞 **macOS-style slide animation**, clipped inside the monitor.
-- 🗂 **Overview screen** (`Ctrl+Alt+↑`) — Mission Control-like grid with drag & drop: move windows between desktops and monitors, move whole desktops to another monitor, right-click move menu.
-- 🌍 **8 languages** — English, Türkçe, Deutsch, Français, Italiano, Русский, 中文, 日本語 (auto-detected, changeable from the tray menu).
-- 🔄 **Update check** from the tray menu via GitHub Releases.
-- 🚀 **Starts with Windows** by default — can be turned off anytime from the tray menu.
-- 🛟 **Crash-safe** — hidden windows are journaled to disk and restored on the next start; everything is restored on exit and when a monitor is unplugged.
+**No installer, just [download](../../archive/refs/heads/main.zip) and `run`. No dependencies except Python.**
 
-## Installation
+- **Per-Screen Desktops** - Each monitor has its own desktops. Switching changes only the screen under your mouse.
+- **Desktops On Demand** - The Overview shows every desktop on every monitor, with previews. Add and delete desktops in the Overview. Drag windows or desktops to rearrange them.
+- **Picks Up Where You Left Off** - Windows and desktops are remembered, even when DisplayDesktop quits or Windows shuts down. The next start puts everything back.
+- **Save And Load Desktops** - **Save** remembers where every window is. **Load** puts it all back whenever you like.
 
-Works on Windows 10 (1607+) and Windows 11 on **x64, x86 and ARM64**. All packages are self-contained — no .NET runtime required.
+## Requirements
 
-**winget:**
+- Windows 11
+- [Python](https://www.python.org/downloads/) 3.10 or newer
+
+## Getting started
+
+Open the DisplayDesktop folder and run:
 
 ```
-winget install harungecit.IndepenDesk
+run
 ```
 
-**Installer (recommended):** download `IndepenDesk-Setup-<version>-<arch>.exe` from [Releases](https://github.com/harungecit/IndepenDesk/releases) and run it — with optional desktop icon, in 7 setup languages.
+DisplayDesktop starts in the system tray (two blue screens icon). You can also double-click `DisplayDesktop.pyw`.
 
-**MSI** (corporate / GPO deployment): `IndepenDesk-<version>-<arch>.msi`.
-
-**Portable:** `IndepenDesk-v<version>-win-<arch>.zip` — extract and run, nothing to install.
-
-**MSIX:** signed with a self-signed certificate — first install `IndepenDesk.cer` into *Local Machine → Trusted People*, then double-click the `.msix`.
-
-The app lives in the system tray (two blue screens icon).
-
-## Shortcuts
-
-| Shortcut | Action |
+| Command | |
 |---|---|
-| `Ctrl+Alt+←` / `Ctrl+Alt+→` | Previous / next desktop on the monitor under the mouse (at the end, `→` creates a new one) |
-| `Ctrl+Alt+↑` | Toggle the Overview |
-| `Ctrl+Alt+1..9` | Jump to the desktop with that global number |
-| `Ctrl+Alt+Shift+←/→` | Move the active window to the adjacent desktop and follow it |
+| `run` | Start DisplayDesktop |
+| `run stop` | Exit (every hidden window comes back) |
+| `run restart` | Restart |
+| `run status` | Show whether it is running and how it is set up |
+| `run recovery` | Opens Recovery: shows what is wrong with each settings file. Restore hidden windows, clear desktops, recreate the settings files, or quit |
+| `run enable-startup` / `run disable-startup` | Start automatically when you sign in, or stop doing so |
 
-An on-screen indicator ("Desktop 4 — Monitor 2 • 2/3") appears on every switch. The tray menu has **How to use…** with an animated gesture guide.
+## Keyboard shortcuts
 
-## Touchpad (macOS-like swipes)
+- **`Ctrl+Alt+←`** / **`Ctrl+Alt+→`** - Previous / next desktop on the screen under the mouse.
+- **`Ctrl+Alt+↑`** - Overview of every desktop: switch, drag windows, add or delete desktops.
 
-By default the 4-finger swipe triggers Windows' **global** desktop switch. Override it:
+## Tray menu
 
-1. Open **Settings → Bluetooth & devices → Touchpad → Advanced gestures**.
-2. For the four-finger swipes pick **Custom shortcut** and record:
-   - swipe left → `Ctrl+Alt+←`, swipe right → `Ctrl+Alt+→`, swipe up → `Ctrl+Alt+↑`
-3. Recording a custom shortcut automatically replaces the Windows default — only the monitor under the cursor will switch.
-
-## How it works
-
-IndepenDesk does not use (and cannot fix) Windows' global virtual desktop system. Instead it keeps per-monitor window sets and, on a switch, hides/shows only the windows of that monitor (`ShowWindow`). Hidden windows also disappear from the taskbar and Alt-Tab, so it feels like a real desktop switch. New windows are adopted onto the active desktop of the monitor they appear on; windows dragged to another monitor follow it automatically.
+- **Overview** - All desktops on all monitors (`Ctrl+Alt+↑`).
+- **Left** / **Right** - Previous / next desktop under the mouse (`Ctrl+Alt+←/→`).
+- **Load** - Puts windows back where they were saved.
+- **Save** - Saves desktops and window positions.
+- **Settings**
+    - **Start With Windows** - Starts at sign-in.
+    - **Add To Start Menu** - Adds DisplayDesktop to the Start menu.
+    - **Use GPU Acceleration** - Runs the desktop slide on the graphics card each monitor is connected to.
+    - **Show Advanced** - Shows these options:
+        - **Settings Folder** - Where settings are saved. **Apply** moves them there; **Default** moves them back. If both folders have settings, you pick which to keep.
+        - **Encrypt Settings** - Type a key and **Apply** to encrypt every settings file. Unchecking decrypts them.
+        - **Remember Key** - Remembers the key on this PC. Off: you're asked at every start.
+        - **Show Console** - Shows a log of what DisplayDesktop does.
+        - **Recovery** - Shows what is wrong with each settings file. Restore hidden windows, clear desktops (one desktop per monitor; deletes the save), recreate the settings files, or quit.
+- **Exit** - Quits. Everything comes back at the next start.
 
 ## Known limitations
 
-- Windows of elevated (admin) apps cannot be hidden unless IndepenDesk itself runs as admin.
-- The native `Win+Ctrl+←/→` still triggers Windows' global switch — simply don't use it.
-- `Ctrl+Alt+←/→` may clash with Intel graphics "rotate screen" hotkeys; disable those in the Intel graphics settings if needed (a tray notification tells you when registration fails).
-- Windows 11's taskbar context menu cannot be extended by third-party apps; use the Overview's right-click menu instead.
+- Windows of apps running as administrator can only be managed when DisplayDesktop runs as administrator too.
+- `Win+Ctrl+←/→` is Windows' own desktop switch and still switches all monitors. Use `Ctrl+Alt` instead.
+- If another program already uses one of the shortcuts, DisplayDesktop shows which ones are unavailable.
+- While a not-responding window has the keyboard focus, the shortcuts don't work. Click another window first.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Based on IndepenDesk by harungecit.
+
+## Fork
+
+DisplayDesktop is a fork of [IndepenDesk](https://github.com/harungecit/IndepenDesk) by harungecit, rewritten from C# to Python. The compiled C# app is an unsigned .exe, which Windows 11's Smart App Control blocks from running. The Python version runs inside the signed `pythonw.exe` from the official Python installer, so it starts normally.
