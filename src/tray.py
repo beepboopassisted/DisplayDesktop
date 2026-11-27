@@ -295,6 +295,8 @@ class TrayApp(G.Window):
         if done:
             console.log(f"Start menu entry {done}.")
         self.mgr = DesktopManager(win=window_api())
+        self.mgr.log = console.log
+        self.mgr.restore_apps = bool(settings.get("RestoreApps"))  # (Restore Applications On Restart)
         # From here on windows can be hidden (the first sync puts windows back on their desktops), and
         # main() only knows this app once __init__ returns: a failure must show them again itself
         try:
@@ -614,7 +616,8 @@ class TrayApp(G.Window):
 
     def _apply_options(self) -> None:
         """The settings that act at once follow the stored ones (after a folder move)."""
-        for step in (lambda: gpu.set_enabled(settings.get("UseGpu")),
+        for step in (lambda: setattr(self.mgr, "restore_apps", bool(settings.get("RestoreApps"))),
+                     lambda: gpu.set_enabled(settings.get("UseGpu")),
                      lambda: shortcut.set_enabled(settings.get("StartMenu")),
                      lambda: console.is_open() != settings.get("ShowConsole")
                      and console.set_enabled(settings.get("ShowConsole"))):

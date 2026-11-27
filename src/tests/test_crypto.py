@@ -41,7 +41,7 @@ class Base(unittest.TestCase):
 class Format(Base):
     def test_plain_while_off(self):
         paths.write_json(self.path(LAYOUT_FILE), {"Windows": []})
-        self.assertEqual(self.raw(LAYOUT_FILE), b'{"Windows":[],"Format":2}')
+        self.assertEqual(self.raw(LAYOUT_FILE), b'{"Windows":[],"Format":%d}' % paths.FORMAT)
 
     def test_encrypted_with_the_marker_and_read_back_with_the_key(self):
         self.assertEqual(REAL_ITERATIONS, 200_000, "part of the file format: files written before must open")
@@ -505,7 +505,7 @@ class Folder(Base):
         self.assertTrue(crypto.folder_encrypted(self.dir) and crypto.unlocks(self.dir, "secret"))
         crypto.use("secret", False)
         self.assertEqual(crypto.recode_folder(self.dir), [])
-        self.assertEqual(json.loads(self.raw(SETTINGS_FILE)), {"StartMenu": True, "Format": 2}, "plain again")
+        self.assertEqual(json.loads(self.raw(SETTINGS_FILE)), {"StartMenu": True, "Format": paths.FORMAT}, "plain again")
 
     def test_a_question_that_fails_halfway_leaves_no_window(self):
         from src import gui as G
@@ -630,7 +630,7 @@ class Tray(Base):
             remember.assert_called_with("secret")
             self.assertTrue(self.T.TrayApp.set_encryption(app, None, False, True))
             remember.assert_called_with(None)
-        self.assertEqual(json.loads(self.raw(SETTINGS_FILE)), {"StartMenu": True, "Format": 2})
+        self.assertEqual(json.loads(self.raw(SETTINGS_FILE)), {"StartMenu": True, "Format": paths.FORMAT})
 
 
 if __name__ == "__main__":

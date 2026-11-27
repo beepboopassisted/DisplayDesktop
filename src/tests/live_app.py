@@ -26,7 +26,7 @@ from src import native as N  # noqa: E402
 from src import startup  # noqa: E402
 from src import tray as T  # noqa: E402
 from src.app import MUTEX_NAME  # noqa: E402
-from src.paths import JOURNAL_FILE, PLACES_FILE  # noqa: E402
+from src.paths import FORMAT, JOURNAL_FILE, PLACES_FILE  # noqa: E402
 
 from fakes import all_desktops, all_showing, all_windows  # noqa: E402
 from live_core import PYTHONW, Helper, check, results, wait_for  # noqa: E402
@@ -275,7 +275,7 @@ def main() -> int:
         answer(app.pid, 6)
         time.sleep(0.5)
         with open(layout, encoding="utf-8") as fh:
-            check(json.load(fh) == {"Setups": [], "Format": 2}, "answer Yes: saved layout erased")
+            check(json.load(fh) == {"Setups": [], "Format": FORMAT}, "answer Yes: saved layout erased")
         app.command(T.ID_SETTINGS)
         check(wait_for(lambda: bool(windows_of(app.pid, "DisplayDesktop.Settings", True)), 5),
               "Settings opens its dialog")
@@ -511,8 +511,13 @@ def main() -> int:
         apps.append(app)
         check(wait_for(lambda: newer_question(app.pid) != 0, 15), "[newer] asked again at the next start")
         G.PostMessageW(newer_question(app.pid), G.WM_COMMAND, 211, 0)  # Recreate Files
+        check(answer(app.pid, 7, 10) != "", "[newer] Recreate Files asks first (No)")
+        check(newer_question(app.pid) != 0 and os.path.exists(settings_file)
+              and not windows_of(app.pid, "DisplayDesktop.Main"), "[newer] No: nothing recreated, Recovery stays")
+        G.PostMessageW(newer_question(app.pid), G.WM_COMMAND, 211, 0)
+        check(answer(app.pid, G.IDYES, 10) != "", "[newer] asked again (Yes)")
         check(wait_for(lambda: bool(windows_of(app.pid, "DisplayDesktop.Main")), 15) and not os.path.exists(settings_file),
-              "[newer] Recreate Files: the file is deleted and the app runs")
+              "[newer] Recreate Files, Yes: the file is deleted and the app runs")
         app.main = windows_of(app.pid, "DisplayDesktop.Main")[0]
         app.post(T.WM_APP_QUIT)
         check(app.exited(10) and visible_all(), "[newer] exits, every window shown")

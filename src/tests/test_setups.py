@@ -11,6 +11,7 @@ import unittest.mock
 
 from src import desktop_manager as DM
 from src import native as N
+from src import paths
 from src.desktop_manager import STARTUP_GRACE_MS, DesktopManager, display_names
 from src.paths import LAYOUT_FILE, PLACES_FILE, SHOWING_FILE
 from src.places import REFRESH_MS
@@ -99,12 +100,12 @@ class Files(Base):
         self.win.advance(REFRESH_MS)
         m.sync()
         layout = self.read(LAYOUT_FILE)
-        self.assertEqual(layout["Format"], 2)
+        self.assertEqual(layout["Format"], paths.FORMAT)
         self.assertEqual([s["Displays"] for s in layout["Setups"]], [["Laptop", "Wide 27"], ["Laptop"]])
         self.assertEqual(sorted(e["Display"] for e in layout["Setups"][0]["Windows"]), ["Laptop", "Wide 27"])
         self.assertEqual([e["Display"] for e in layout["Setups"][1]["Windows"]], ["Laptop", "Laptop"])
         places = self.read(PLACES_FILE)
-        self.assertEqual(places["Format"], 2)
+        self.assertEqual(places["Format"], paths.FORMAT)
         by = {tuple(s["Displays"]): s for s in places["Setups"]}
         self.assertEqual(set(by), {("Laptop", "Wide 27"), ("Laptop",)})
         self.assertEqual(by[("Laptop", "Wide 27")]["Desktops"], {"Laptop": 1, "Wide 27": 1})
@@ -129,8 +130,56 @@ class Files(Base):
         m = self.manager()
         self.assertEqual(len(m.desktops_of(D1)), 1, "format 1 desktop counts are not used")
         self.assertEqual(m.current_of(D1), 0)
-        from src import paths
         self.assertEqual(paths.read_json(os.path.join(self.dir, "display.desktop.settings.json")), {"UseGpu": False})
+
+    def format_2(self, name):
+        """A format 2 file of two setups whose windows have title parts (matched by title then)."""
+        def window(left):
+            return {"Exe": r"C:\Apps\app.exe", "Class": "AppWindow", "Display": "MON-A", "Left": left,
+                    "TitleParts": ["AB12", "CD34"]}
+        data = {"Setups": [{"Displays": ["MON-A", "MON-B"], "Windows": [window(10), window(20), window(30)]},
+                           {"Displays": ["MON-A"], "Windows": [window(40), window(50)]}], "Format": 2}
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        return path
+
+    def test_format_2_windows_lose_their_title_parts_and_get_their_order_in_their_setup(self):
+        for name in (LAYOUT_FILE, PLACES_FILE):
+            data = paths.read_json(self.format_2(name))
+            got = [[(w["Left"], w["Order"]) for w in s["Windows"]] for s in data["Setups"]]
+            self.assertEqual(got, [[(10, 0), (20, 1), (30, 2)], [(40, 0), (50, 1)]], name)
+            self.assertFalse(any("TitleParts" in w for s in data["Setups"] for w in s["Windows"]), name)
+
+    def test_a_format_2_places_file_puts_windows_back_in_its_order(self):
+        path = self.format_2(PLACES_FILE)
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["Setups"][0]["Windows"].reverse()  # (Order is the file order: 30, 20, 10)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        m = DesktopManager(win=self.win, snapshots=FakeSnapshots(), directory=self.dir)
+        a = self.win.add("Any", 0, rect=(300, 300, 700, 700))
+        m.sync()
+        self.assertEqual(self.rect(a)[0], 30, "the first to open: the first window of the file")
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["Format"], paths.FORMAT, "written in the current format")
+
+    def test_format_3_and_4_place_files_read_without_command_or_app(self):
+        for old in (3, 4):
+            row = {"Exe": r"C:\Apps\app.exe", "Class": "AppWindow", "Display": "MON-A", "Left": 70, "Order": 0,
+                   "Pid": 9, **({"Command": "app.exe"} if old == 4 else {})}
+            with open(os.path.join(self.dir, PLACES_FILE), "w", encoding="utf-8") as fh:
+                json.dump({"Updated": 1, "UptimeMs": 1, "Setups": [{"Displays": ["MON-A", "MON-B"], "Windows": [row]}],
+                           "Format": old}, fh)
+            win = FakeWin()
+            m = DesktopManager(win=win, snapshots=FakeSnapshots(), directory=self.dir)
+            m.sync()
+            self.assertEqual(m._places.apps_to_restart(), [(r"C:\Apps\app.exe", "app.exe", "")] if old == 4 else [],
+                             f"format {old}: a command line only from format 4 on")
+            a = win.add("Any", 0, rect=(300, 300, 700, 700))
+            m.sync()
+            self.assertEqual(win.windows[a].rect[0], 70, f"format {old}: its window goes back")
 
 
 class Attach(Base):

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from src import settings
+from src import paths, settings
 
 
 class Settings(unittest.TestCase):
@@ -33,12 +33,12 @@ class Settings(unittest.TestCase):
 
     def test_only_values_that_differ_from_the_default_are_stored(self):
         settings.set("StartMenu", True)
-        self.assertEqual(self.read(), '{"StartMenu":true,"Format":2}')
+        self.assertEqual(self.read(), '{"StartMenu":true,"Format":%d}' % paths.FORMAT)
         settings.set("ShowConsole", True)
-        self.assertEqual(self.read(), '{"StartMenu":true,"ShowConsole":true,"Format":2}')
+        self.assertEqual(self.read(), '{"StartMenu":true,"ShowConsole":true,"Format":%d}' % paths.FORMAT)
         self.assertEqual((settings.get("StartMenu"), settings.get("ShowConsole")), (True, True))
         settings.set("StartMenu", False)
-        self.assertEqual(self.read(), '{"ShowConsole":true,"Format":2}')
+        self.assertEqual(self.read(), '{"ShowConsole":true,"Format":%d}' % paths.FORMAT)
         settings.set("ShowConsole", False)
         self.assertIsNone(self.read(), "all defaults: no file")
 
@@ -51,11 +51,22 @@ class Settings(unittest.TestCase):
 
     def test_use_gpu_off_is_stored_on_is_the_default(self):
         settings.set("UseGpu", False)
-        self.assertEqual(self.read(), '{"UseGpu":false,"Format":2}')
+        self.assertEqual(self.read(), '{"UseGpu":false,"Format":%d}' % paths.FORMAT)
         self.assertFalse(settings.get("UseGpu"))
         settings.set("UseGpu", True)
         self.assertIsNone(self.read())
         self.assertTrue(settings.get("UseGpu"))
+
+    def test_restore_apps_is_off_by_default_and_on_is_stored(self):
+        self.assertFalse(settings.get("RestoreApps"), "Restore Applications On Restart is off by default")
+        settings.set("RestoreApps", True)
+        self.assertEqual(self.read(), '{"RestoreApps":true,"Format":%d}' % paths.FORMAT)
+        self.assertTrue(settings.get("RestoreApps"))
+        settings.set("RestoreApps", False)
+        self.assertIsNone(self.read(), "off again: the default, no file")
+        with open(self.file, "w", encoding="utf-8") as fh:
+            fh.write('{"RestoreApps":"yes"}')
+        self.assertFalse(settings.get("RestoreApps"), "a wrong type reads as the default")
 
     def test_a_wrong_gpu_value_reads_as_the_default(self):
         for wrong in ('{"UseGpu":"yes"}', '{"UseGpu":1}'):
@@ -67,7 +78,7 @@ class Settings(unittest.TestCase):
         with open(self.file, "w", encoding="utf-8") as fh:
             fh.write("{not json")
         settings.set("StartMenu", True)
-        self.assertEqual(self.read(), '{"StartMenu":true,"Format":2}')
+        self.assertEqual(self.read(), '{"StartMenu":true,"Format":%d}' % paths.FORMAT)
 
 
 class RepoLink(unittest.TestCase):

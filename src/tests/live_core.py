@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(HERE, "..", ".."))  # the repo (src\tests -> ..\
 
 from src import native as N  # noqa: E402
 from src.desktop_manager import DesktopManager  # noqa: E402
-from src.paths import JOURNAL_FILE  # noqa: E402
+from src.paths import FORMAT, JOURNAL_FILE  # noqa: E402
 from src.testing import ScopedWin  # noqa: E402
 from fakes import all_showing, all_windows  # noqa: E402
 from moving import move_window  # noqa: E402
@@ -294,11 +294,21 @@ def main() -> int:
         mgr3 = DesktopManager(win=win, directory=tmp)
         managers.append(mgr3)
         mgr3.sync()
-        a2, b2 = h1b.windows["WS Test Alpha"], h1b.windows["WS Test Beta"]
-        check(b2 in mgr3.desktops_of(dev)[1] and not N.is_window_visible(b2),
-              "reopened beta is put back on desktop 2 (last known place)")
-        check(placement(a2) == alpha_place, "reopened alpha is put back at its saved position")
-        check(placement(b2)[1] == beta_place[1], "reopened beta is put back at its saved position")
+        # (by count, never by title: the app's n-th window, in the order DisplayDesktop first saw them,
+        # takes its n-th recorded place; windows already open when it started are counted in z-order)
+        from src.layout import order_of
+        reopened = sorted(h1b.windows.values(), key=lambda h: order_of(h, win))
+        bound = [mgr3._places.bound_entry(h) for h in reopened]
+        check(all(e is not None for e in bound) and len({id(e) for e in bound}) == len(reopened)
+              and [e.Order for e in bound] == sorted(e.Order for e in bound),
+              "reopened windows take the recorded places by count (first to first), one each")
+        check(all(e is not None and h in mgr3.desktops_of(dev)[e.Desktop]
+                  and N.is_window_visible(h) == (e.Desktop == mgr3.current_of(dev)) for h, e in zip(reopened, bound)),
+              "reopened windows are put back on their places' desktops (hidden where not shown)")
+        check(all(e is not None and placement(h)[1] == (e.Left, e.Top, e.Right, e.Bottom) for h, e in zip(reopened, bound)),
+              "reopened windows are put back at their places' positions")
+        check(sorted(placement(h)[1] for h in reopened if placement(h)[1] in (alpha_place[1], beta_place[1]))
+              == sorted((alpha_place[1], beta_place[1])), "the saved positions are all taken again")
         mgr3.restore_all()
 
         # --- hung window: never hidden
@@ -389,7 +399,7 @@ def main() -> int:
         # --- clear
         mgr3.clear_desktops()
         with open(os.path.join(tmp, "display.desktop.layout.json"), encoding="utf-8") as fh:
-            check(json.load(fh) == {"Setups": [], "Format": 2}, "clear desktops erases the saved layout")
+            check(json.load(fh) == {"Setups": [], "Format": FORMAT}, "clear desktops erases the saved layout")
     finally:
         for m in managers:
             m.restore_all()

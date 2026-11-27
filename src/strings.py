@@ -15,6 +15,7 @@ _TEXT = {
     "settings.startMenu": "Add To Start Menu",
     "settings.console": "Show Console",
     "settings.gpu": "Use GPU Acceleration",
+    "settings.restoreApps": "Restore Applications On Restart",
     "settings.recovery": "Recovery",
     "settings.close": "Close",
     "settings.folder": "Settings Folder",
@@ -105,6 +106,8 @@ _TEXT = {
     "msg.exitConfirm": "Are you sure you want to quit DisplayDesktop?",
     "msg.restoreConfirm": "Restore hidden windows?\n\nLists every hidden window, so you can bring the ones you pick "
                           "back to desktop 1.",
+    "msg.recreateConfirm": "Recreate settings files?\n\nEach file is written again. Files that can't be read start "
+                           "fresh. Can't be undone.",
     "msg.clearConfirm": "Clear desktops?\n\nMerges all desktops and deletes your save. Can't be undone.",
     "msg.alreadyRunning": "DisplayDesktop is already running.",
     "msg.crash": "DisplayDesktop ran into an unexpected error and will close. All hidden windows have been restored.\n\n{0}",

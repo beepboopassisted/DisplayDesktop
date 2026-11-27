@@ -590,6 +590,108 @@ def process_started(pid: int) -> int:
         CloseHandle(p)
 
 
+_cmdline_api: list = []  # NtQueryInformationProcess, declared on first use (Restore Applications On Restart)
+
+
+def process_command_line(pid: int) -> str:
+    """The command line a process was started with ("" if it can't be read: an elevated process, or
+    one already gone). Only for processes of this user."""
+    if not _cmdline_api:
+        _cmdline_api.append(_f(_load("ntdll.dll"), "NtQueryInformationProcess", c_long, H, c_ulong, c_void_p,
+                               c_ulong, POINTER(c_ulong)))
+    p = _OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid) if pid else 0
+    if not p:
+        return ""
+    try:
+        size = c_ulong(0)
+        buf = ctypes.create_string_buffer(4096)
+        status = _cmdline_api[0](p, 60, buf, len(buf), byref(size))  # ProcessCommandLineInformation
+        if status != 0 and size.value > len(buf):  # (STATUS_INFO_LENGTH_MISMATCH: a longer one)
+            buf = ctypes.create_string_buffer(size.value)
+            status = _cmdline_api[0](p, 60, buf, len(buf), byref(size))
+        if status != 0:
+            return ""
+        # UNICODE_STRING {USHORT Length; USHORT MaximumLength; PWSTR Buffer} at the start of the buffer
+        length = int.from_bytes(buf.raw[0:2], "little")
+        address = c_void_p.from_buffer(buf, sizeof(c_void_p)).value  # (Buffer: aligned after the two USHORTs)
+        return ctypes.wstring_at(address, length // 2) if address and length else ""
+    finally:
+        CloseHandle(p)
+
+
+_GetApplicationUserModelId = _f(kernel32, "GetApplicationUserModelId", c_long, H, POINTER(c_uint), c_wchar_p)
+_FindWindowExW = _f(user32, "FindWindowExW", H, H, H, c_wchar_p, c_wchar_p)
+FRAME_CLASS, CORE_CLASS = "ApplicationFrameWindow", "Windows.UI.Core.CoreWindow"
+
+
+def _process_app_id(pid: int) -> str:
+    """The app id (AppUserModelID) of a packaged app's process ("" for other programs)."""
+    p = _OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid) if pid else 0
+    if not p:
+        return ""
+    try:
+        size = c_uint(256)
+        buf = create_unicode_buffer(256)
+        return buf.value if _GetApplicationUserModelId(p, byref(size), buf) == 0 else ""
+    finally:
+        CloseHandle(p)
+
+
+def window_app_id(h: int) -> str:
+    """The app id (AppUserModelID) of a packaged app's window (Store apps, packaged programs): what
+    starts it again (shell:AppsFolder\\<id>). A Store app's frame belongs to the shared host: the
+    app's own window inside it says which app it is. "" for other programs."""
+    if get_class(h) == FRAME_CLASS:
+        core = _FindWindowExW(h, 0, CORE_CLASS, None)
+        return _process_app_id(get_pid(core)) if core else ""
+    return _process_app_id(get_pid(h))
+
+
+def running_app_ids() -> set[str]:
+    """The app ids of the packaged apps running now."""
+    out = set()
+    for pid in _all_pids():
+        app = _process_app_id(pid)
+        if app:
+            out.add(app)
+    return out
+
+
+def start_app(app_id: str) -> None:
+    """Starts a packaged app by its app id, as the Start menu does (raises OSError if it can't)."""
+    import subprocess
+    explorer = os.path.join(os.path.dirname(_SYS32), "explorer.exe")
+    subprocess.Popen([explorer, "shell:AppsFolder\\" + app_id], close_fds=True)
+
+
+_EnumProcesses = _f(kernel32, "K32EnumProcesses", BOOL, POINTER(DWORD), DWORD, POINTER(DWORD))
+
+
+def _all_pids() -> list[int]:
+    pids = (DWORD * 4096)()
+    got = DWORD(0)
+    if not _EnumProcesses(pids, sizeof(pids), byref(got)):
+        return []
+    return [p for p in pids[:got.value // sizeof(DWORD)] if p]
+
+
+def running_programs() -> set[str]:
+    """Lowercased paths of the programs running now (those this user can query)."""
+    out = set()
+    buf = create_unicode_buffer(1024)
+    for pid in _all_pids():
+        p = _OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not p:
+            continue
+        try:
+            size = DWORD(1024)
+            if _QueryFullProcessImageNameW(p, 0, buf, byref(size)):
+                out.add(buf.value.lower())
+        finally:
+            CloseHandle(p)
+    return out
+
+
 tick_count64 = _GetTickCount64
 
 

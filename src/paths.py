@@ -136,7 +136,7 @@ def forget_failures(folder: str | None = None) -> None:
 # ours, a bad format), or of a NEWER format (a hacked file, or an older version installed again, e.g.
 # from a backup or on a new computer). The user is asked (tray: Quit, or delete the files and start
 # them fresh; never converted back or repaired); until answered it reads as damaged (ValueError).
-FORMAT = 2
+FORMAT = 5
 FORMAT_KEY = "Format"
 
 
@@ -146,7 +146,33 @@ def _from_1(name: str, data: dict) -> dict:
     return {} if name.lower() in (LAYOUT_FILE, PLACES_FILE, SHOWING_FILE) else data
 
 
-MIGRATIONS: dict[int, object] = {1: _from_1}  # format n -> fn(file name, data) returning that file's data in format n + 1
+def _from_2(name: str, data: dict) -> dict:
+    """Format 3 matches windows by count, not title: saved windows lose "TitleParts" and get
+    "Order" (their order in the file, per setup)."""
+    if name.lower() not in (LAYOUT_FILE, PLACES_FILE):
+        return data
+    for setup in data.get("Setups") or []:
+        if isinstance(setup, dict):
+            for i, w in enumerate(setup.get("Windows") or []):
+                if isinstance(w, dict):
+                    w.pop("TitleParts", None)
+                    w["Order"] = i
+    return data
+
+
+def _from_3(name: str, data: dict) -> dict:
+    """Format 4: places.json windows carry "Command" (their program's command line, for Restore
+    Applications On Restart). Older records have none: their apps are not started again."""
+    return data
+
+
+def _from_4(name: str, data: dict) -> dict:
+    """Format 5: places.json windows carry "App" (a packaged app's id: Store apps start again by it).
+    Older records have none: their Store apps are not started again."""
+    return data
+
+
+MIGRATIONS: dict[int, object] = {1: _from_1, 2: _from_2, 3: _from_3, 4: _from_4}  # format n -> fn(file name, data) returning that file's data in format n + 1
 on_unreadable = None  # called with a data file's path when it can't be read at all (tray: the question);
 # returns whether that question covers the file (the error then carries `asked = True`)
 kept: set[str] = set()  # normcased paths waiting for the Quit / Recreate Files answer: never written over

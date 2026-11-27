@@ -13,6 +13,7 @@ from unittest import mock
 
 from src import desktop_manager as DM
 from src import native as N
+from src import paths
 from src.desktop_manager import MAX_DESKTOPS_PER_MONITOR, STARTUP_GRACE_MS, DesktopManager
 from src.layout import title_hash
 from src.paths import JOURNAL_FILE, PLACES_FILE
@@ -743,10 +744,11 @@ class SavedLayout(Base):
         self.assertEqual(setup["Showing"], {"MON-A": 1, "MON-B": 0})
         e = next(x for x in setup["Windows"] if x["Class"] == "EditorWnd")
         self.assertEqual(list(e), ["Exe", "Class", "TitleHash", "Display", "Desktop", "WorkLeft",
-                                   "WorkTop", "ShowCmd", "Left", "Top", "Right", "Bottom", "TitleParts"],
-                         "the keys in order; the title parts come after them")
+                                   "WorkTop", "ShowCmd", "Left", "Top", "Right", "Bottom", "Order"],
+                         "the keys in order; no title parts")
         self.assertEqual(e["TitleHash"], title_hash("Doc - Editor"))
-        self.assertEqual(e["TitleParts"], [title_hash("doc"), title_hash("editor")], "only hashes")
+        other = next(x for x in setup["Windows"] if x["Class"] != "EditorWnd")
+        self.assertLess(e["Order"], other["Order"], "Order: when each window was first seen")
         self.assertEqual(e["Desktop"], 1)
         self.assertEqual(e["Display"], "MON-A")
         self.assertNotIn("Doc - Editor", raw, "titles are stored only as a hash")
@@ -767,7 +769,7 @@ class SavedLayout(Base):
         self.assertTrue(self.visible(a2))
         self.assertEqual(self.win.windows[a2].rect, (300, 300, 700, 700), "not moved")
 
-    def test_loose_match_only_during_grace(self):
+    def test_matched_whatever_the_title_only_during_grace(self):
         a = self.win.add("Inbox (3) - Mail", exe=r"C:\Apps\mail.exe", cls="Mail")
         self.win.foreground = a
         m = self.manager()
@@ -780,7 +782,7 @@ class SavedLayout(Base):
         m2.sync()
         self.assertIn(a2, m2.desktops_of(D1)[1])
         self.assertEqual(m2.current_of(D1), 1, "the saved shown desktop is shown again")
-        # after the grace time a different title is not matched
+        # after the grace time a window opens where Windows puts it
         self.win.close(a2)
         m3 = self.manager()
         self.win.advance(STARTUP_GRACE_MS + 1)
@@ -788,7 +790,7 @@ class SavedLayout(Base):
         m3.sync()
         self.assertEqual(m3.desktops_of(D1), [[a3], []], "not placed (desktop 2 is kept, empty)")
 
-    def test_exact_match_beats_loose_and_closest_wins(self):
+    def test_by_count_the_first_window_to_open_takes_the_first_place_wherever_it_opens(self):
         x1 = self.win.add("Same", rect=(0, 0, 500, 500))
         x2 = self.win.add("Same", rect=(1000, 0, 1500, 500))
         self.win.foreground = x2
@@ -798,11 +800,13 @@ class SavedLayout(Base):
         self.win.close(x1)
         self.win.close(x2)
         m2 = self.manager()
-        n2 = self.win.add("Same", rect=(990, 10, 1490, 510))  # opens near x2's place
-        n1 = self.win.add("Same", rect=(10, 10, 510, 510))
+        n1 = self.win.add("Same", rect=(990, 10, 1490, 510))  # opens first, near x2's place
+        n2 = self.win.add("Same", rect=(10, 10, 510, 510))
         m2.sync()
+        self.assertIn(n1, m2.desktops_of(D1)[0], "the first to open: x1's place (never the nearest)")
+        self.assertEqual(self.win.windows[n1].rect, (0, 0, 500, 500))
         self.assertIn(n2, m2.desktops_of(D1)[1])
-        self.assertIn(n1, m2.desktops_of(D1)[0])
+        self.assertEqual(self.win.windows[n2].rect, (1000, 0, 1500, 500))
 
     def test_displaced_window_returns_with_its_monitor(self):
         b = self.win.add("B", 1)
@@ -882,7 +886,7 @@ class SavedLayout(Base):
         self.assertEqual(sorted(m.desktops_of(D1)[0]), sorted([a, b]))
         self.assertTrue(self.visible(a) and self.visible(b))
         with open(self.layout_file, encoding="utf-8") as fh:
-            self.assertEqual(json.load(fh), {"Setups": [], "Format": 2})
+            self.assertEqual(json.load(fh), {"Setups": [], "Format": paths.FORMAT})
         self.assertIsNone(self.journal)
 
     def test_load_desktops_reapplies(self):
@@ -920,7 +924,7 @@ class SavedLayout(Base):
 class SameNameWindows(Base):
     """Several windows with the same program, class and title (three windows of a second browser),
     and windows of one program whose titles change (two browser windows): each is saved and comes
-    back on its own."""
+    back on its own, by count (the first to open takes the first one's place)."""
     TWIN = dict(exe=r"C:\Program Files\Other Browser\browser2.exe", cls="BrowserWindowClass2")
     FF = dict(exe=r"C:\Program Files\Web Browser\browser.exe", cls="BrowserWindowClass")
     STORE = dict(exe=r"C:\Windows\System32\ApplicationFrameHost.exe", cls="ApplicationFrameWindow")
@@ -1004,7 +1008,7 @@ class SameNameWindows(Base):
 
     def test_one_store_app_never_takes_another_store_apps_place(self):
         # All Store apps share ApplicationFrameHost.exe and the class ApplicationFrameWindow, so
-        # the title is all that tells them apart: never matched loosely
+        # the title (the app's name) is all that tells them apart: they are counted per title
         photos = self.win.add("Photos", 0, rect=(900, 100, 1220, 600), **self.STORE)
         m = self.manager()
         m.sync()
@@ -1240,10 +1244,10 @@ class LastKnownPlaces(Base):
                              f"every window back on its own desktop (z-order {order})")
             m2.restore_all()
 
-    def test_reboot_puts_same_app_windows_back_on_their_own_displays(self):
-        # Before: browser A near the right edge of display 1 (desktop 2), browser B on display 2
-        # (desktop 2). After the reboot both have other titles, and B reopens at the left edge of
-        # display 2: in pixels nearer to A's old place than to its own. The display decides.
+    def test_reboot_puts_same_app_windows_back_by_count_whatever_their_display(self):
+        # Before: browser A on display 1 (desktop 2), browser B on display 2 (desktop 2), A first.
+        # After the reboot both have other titles: the first to open takes A's place, the second
+        # B's, whichever display Windows opens them on (neither the display nor the title decides).
         a = self.win.add("Inbox - Web Browser", 0, rect=(1000, 100, 1900, 900), **self.FF)
         b = self.win.add("News - Web Browser", 1, rect=(2800, 100, 3700, 900), **self.FF)
         m = self.manager()
@@ -1265,16 +1269,16 @@ class LastKnownPlaces(Base):
                 fh.write(snapshot)  # the same file for both orders
             self.win.reboot()
             m2 = self.manager()
-            # B opens mostly on display 2 (its centre is there) but its left edge is at 1450:
-            # 450 px from A's old place, 1350 px from its own
             opened = [("B", 1, (1450, 100, 2450, 900)), ("A", 0, (900, 100, 1800, 900))]
-            made = {}
+            made = []
             for name, mon, rect in (opened if b_first else opened[::-1]):
-                made[name] = self.win.add(name + " page - Web Browser", mon, rect=rect, **self.FF)
+                made.append(self.win.add(name + " page - Web Browser", mon, rect=rect, **self.FF))
             m2.sync()
-            self.assertEqual(self.where(m2, made["A"]), (D1, 1), f"A back on display 1, desktop 2 (B first: {b_first})")
-            self.assertEqual(self.where(m2, made["B"]), (D2, 1), f"B back on display 2, desktop 2 (B first: {b_first})")
-            self.assertEqual(self.win.windows[made["B"]].rect, (2800, 100, 3700, 900), "at B's own position")
+            first, second = made
+            self.assertEqual(self.where(m2, first), (D1, 1), f"the first to open: A's place (B first: {b_first})")
+            self.assertEqual(self.win.windows[first].rect, (1000, 100, 1900, 900), "at A's position")
+            self.assertEqual(self.where(m2, second), (D2, 1), f"the second: B's place (B first: {b_first})")
+            self.assertEqual(self.win.windows[second].rect, (2800, 100, 3700, 900), "at B's position")
             m2.restore_all()
 
     def test_positions_are_recorded_every_2_seconds(self):
@@ -1325,10 +1329,10 @@ class LastKnownPlaces(Base):
         self.assertEqual([sorted(s) for s in m2.desktops_of(D1)], [sorted([a, b])])
 
 
-class BrowsersBySite(Base):
+class BrowsersByCount(Base):
     """Several windows of one browser after a reboot: new handles, other pages, all reopened at one
-    spot. The site in the title (a title part like "Webmail") decides where each goes; a window whose
-    site matches nothing takes a remaining place of that browser."""
+    spot. Matched by count, never by title: the browser's first window to open takes the place of
+    the one first seen last time, the second the second's; one with no place left stays put."""
     FF = dict(exe=r"C:\Program Files\Web Browser\browser.exe", cls="BrowserWindowClass")
 
     def where(self, m, h):
@@ -1367,108 +1371,266 @@ class BrowsersBySite(Base):
         "Budget 2026 - Pine Docs - Web Browser": (1, 1),
         "Front page - The News - Web Browser": (1, 0),
     }
-    AFTER = {  # same sites, other pages; the news site was not reopened, a weather site was
-        "Inbox (7) - Webmail - Web Browser": (D1, 0),
-        "Another video - Video Hub — Web Browser": (D1, 1),
-        "Trip plan - Pine Docs - Web Browser": (D2, 1),
-        "Weather - Web Browser": (D2, 0),  # no site in common: the browser's remaining place
-    }
+    AFTER = ["Inbox (7) - Webmail - Web Browser", "Another video - Video Hub — Web Browser",
+             "Trip plan - Pine Docs - Web Browser", "Weather - Web Browser"]  # other pages
 
-    def test_each_site_goes_back_to_its_own_place(self):
+    def test_each_window_takes_the_place_of_its_rank(self):
+        # Other pages after the reboot, in either order: the first to open takes the place recorded
+        # first, and so on, whatever its title
         for order in (list(self.AFTER), list(self.AFTER)[::-1]):
             self.tearDown()  # a fresh start for each order (the last one is cleaned up as usual)
             self.setUp()
             m2 = self.arrange_and_reboot(self.BEFORE)
-            made = {t: self.win.add(t, 0, rect=(300, 300, 1200, 900), **self.FF) for t in order}
+            made = [self.win.add(t, 0, rect=(300, 300, 1200, 900), **self.FF) for t in order]
             m2.sync()
-            got = {t: self.where(m2, h) for t, h in made.items()}
-            self.assertEqual(got, self.AFTER, f"opened in the order {order}")
+            got = [self.where(m2, h) for h in made]
+            self.assertEqual(got, [(D1, 0), (D1, 1), (D2, 1), (D2, 0)], f"opened in the order {order}")
+            extra = self.win.add("Chat - Web Browser", 0, rect=(300, 300, 1200, 900), **self.FF)
+            m2.sync()
+            self.assertEqual(self.where(m2, extra), (D1, 0), "a fifth window: no place left, stays where it opened")
+            self.assertTrue(self.visible(extra))
+            self.assertEqual(self.win.windows[extra].rect, (300, 300, 1200, 900), "not moved")
 
-    def test_the_site_beats_the_display_and_the_position(self):
-        # Webmail reopens on display 2, right where the Docs window used to be: still goes to Webmail's place
+    def test_a_title_like_a_saved_one_does_not_pick_its_place(self):
+        # Webmail's window opens second: it takes the second place (Docs'), not Webmail's
         m2 = self.arrange_and_reboot({"Inbox - Webmail - Web Browser": (0, 1),
                                       "Notes - Pine Docs - Web Browser": (1, 1)})
-        webmail = self.win.add("Sent - Webmail - Web Browser", 1, rect=(2000, 100, 3400, 1000), **self.FF)
+        docs = self.win.add("Notes - Pine Docs - Web Browser", 0, rect=(300, 300, 1200, 900), **self.FF)
         m2.sync()
-        self.assertEqual(self.where(m2, webmail), (D1, 1))
-
-    def test_one_saved_place_still_goes_to_its_own_site(self):
-        # A single saved browser place: the site in its title still picks the right one of two windows
-        from src.layout import SITE
-        m2 = self.arrange_and_reboot({"Inbox - Mail - Web Browser": (0, 1)})
-        news = self.win.add("News - Daily - Web Browser", 0, rect=(100, 100, 900, 700), **self.FF)
-        mail = self.win.add("Sent - Mail - Web Browser", 0, rect=(1200, 600, 1900, 1000), **self.FF)
-        got = m2._places.assign([news, mail], SITE)
-        self.assertEqual([h for h, _ in got], [mail], "the Mail window, by its site")
-
-    def test_the_browser_name_alone_is_not_a_site(self):
-        # "Web Browser" is in every title: it does not make one place a better match than another
-        from src.layout import SITE
-        m2 = self.arrange_and_reboot({"A - Site One - Web Browser": (0, 1),
-                                      "B - Site Two - Web Browser": (1, 1)})
-        h = self.win.add("Weather - Web Browser", 0, **self.FF)
-        self.assertEqual(m2._places.assign([h], SITE), [], "no site match")
+        webmail = self.win.add("Inbox - Webmail - Web Browser", 0, rect=(300, 300, 1200, 900), **self.FF)
         m2.sync()
-        self.assertIsNotNone(self.where(m2, h), "it still gets a place by the browser name")
+        self.assertEqual(self.where(m2, docs), (D1, 1), "the first to open: the first place")
+        self.assertEqual(self.where(m2, webmail), (D2, 1), "the second: the second place")
 
-    def test_one_odd_title_does_not_make_the_browser_name_a_site(self):
-        # A window without the browser's name in its title ("Downloads") must not empty the parts
-        # every title shares: "Web Browser" would then count as a site
-        from src.layout import SITE
-        m2 = self.arrange_and_reboot({"News - Web Browser": (0, 1), "Docs - Web Browser": (1, 1)})
-        mail = self.win.add("Mail - Web Browser", 0, **self.FF)
-        odd = self.win.add("Downloads", 0, **self.FF)
-        self.assertEqual(m2._places.assign([mail, odd], SITE), [], "no site match by the browser name")
 
-    def test_one_odd_saved_title_does_not_make_the_browser_name_a_site(self):
-        from src.layout import SITE
-        m2 = self.arrange_and_reboot({"News - Web Browser": (0, 1), "Docs - Web Browser": (1, 1),
-                                      "Downloads": (0, 0)})
-        mail = self.win.add("Mail - Web Browser", 0, **self.FF)
-        self.assertEqual(m2._places.assign([mail], SITE), [], "no site match by the browser name")
+class MatchByCount(Base):
+    """Windows are matched by program and class, by count, never by title: the program's i-th window
+    (in the order DisplayDesktop first saw them, layout.order_of) takes its i-th free place (by the
+    places' Order); one with no place left stays where Windows opened it. Store apps (one program
+    for all of them) are counted per title."""
+    ED = dict(exe=r"C:\Apps\editor.exe", cls="EditorWnd")
+    STORE = dict(exe=r"C:\Windows\System32\ApplicationFrameHost.exe", cls="ApplicationFrameWindow")
+    P1, P2 = (100, 100, 900, 700), (2000, 200, 2800, 800)  # the places: display 1 desktop 2, display 2 desktop 1
 
-    def test_repeated_odd_open_titles_do_not_make_the_browser_name_a_site(self):
-        from src.layout import SITE
-        m2 = self.arrange_and_reboot({"News - Web Browser": (0, 1)})
-        odd = [self.win.add("Downloads", 0, **self.FF) for _ in range(3)]
-        mail = self.win.add("Mail - Web Browser", 0, **self.FF)
-        got = m2._places.assign(odd + [mail], SITE)
-        self.assertNotIn(mail, [h for h, _ in got], "no site match by the browser name")
+    def where(self, m, h):
+        for dev in (D1, D2):
+            for i, s in enumerate(m.desktops_of(dev)):
+                if h in s:
+                    return dev, i
+        return None
 
-    def test_repeated_odd_open_titles_like_a_saved_one_do_not_make_the_browser_name_a_site(self):
-        from src.layout import SITE
-        m2 = self.arrange_and_reboot({"News - Web Browser": (0, 1), "Downloads": (1, 1)})
-        odd = [self.win.add("Downloads", 0, **self.FF) for _ in range(3)]
-        mail = self.win.add("Mail - Web Browser", 0, **self.FF)
-        got = m2._places.assign(odd + [mail], SITE)
-        self.assertNotIn(mail, [h for h, _ in got], "no site match by the browser name")
+    def two_places_then_reboot(self, titles=("Report - Editor", "Notes - Editor"), **kind):
+        """The program's first window on display 1 desktop 2 (P1), its second on display 2 desktop 1
+        (P2); then the computer restarts. Returns the manager started after it."""
+        kind = kind or self.ED
+        first = self.win.add(titles[0], 0, rect=self.P1, **kind)
+        second = self.win.add(titles[1], 1, rect=self.P2, **kind)
+        m = self.manager()
+        m.sync()
+        m.create_desktop_and_switch(D1)
+        m.move_window_to_desktop(first, D1, 1)
+        m.switch_to(D1, 0)
+        m.restore_all()
+        self.win.reboot()
+        return self.manager()
 
-    def test_odd_saved_titles_as_frequent_as_the_browser_name_do_not_make_it_a_site(self):
-        from src.layout import program_parts
-        titles = [{"news", "web browser"}, {"docs", "web browser"}, {"downloads"}, {"downloads"}]
-        self.assertIn("web browser", program_parts(titles))
-        self.assertEqual(program_parts([{"a", "x"}, {"b", "y"}]), set(), "nothing repeats: nothing shared")
-        self.assertEqual(program_parts([{"news", "web browser"}]), {"news", "web browser"}, "one title: all")
+    @staticmethod
+    def new_process():
+        """DisplayDesktop alone starts again (same boot): its spawn numbers are gone with its process."""
+        from src import layout
+        layout._order.clear()
+        layout._next_order[0] = 1
 
-    def test_unread_counters_are_ignored(self):
-        from src.layout import title_parts
-        self.assertEqual(title_parts("Inbox (3) - Webmail - Web Browser"),
-                         title_parts("Inbox (12) - Webmail - Web Browser"))
-        self.assertEqual(title_parts("(99+) Home | X"), title_parts("(4) Home | X"))
+    def test_windows_first_noticed_by_a_record_are_numbered_oldest_first(self):
+        m = self.manager()
+        m.sync()
+        self.win.advance(STARTUP_GRACE_MS + 1)  # (no placing: only the record sees them)
+        a = self.win.add("A - Editor", 0, **self.ED)  # opens first (lower in z-order)
+        b = self.win.add("B - Editor", 0, **self.ED)
+        m.sync()
+        self.assertLess(m._places.bound_entry(a).Order, m._places.bound_entry(b).Order,
+                        "the window that opened first is counted first")
 
-    def test_unsaved_marks_are_ignored(self):
-        from src.layout import title_parts
-        self.assertEqual(title_parts("*b.txt - Notepad"), title_parts("b.txt - Notepad"))
-        self.assertEqual(title_parts("● main.py - project - Code Editor"),
-                         title_parts("main.py - project - Code Editor"))
+    def test_windows_seen_together_count_by_their_process_start_first(self):
+        m = self.manager()
+        m.sync()
+        self.win.advance(STARTUP_GRACE_MS + 1)
+        early = self.win.add("Early - Editor", 0, pid=2001, **self.ED)  # its process started first
+        late = self.win.add("Late - Editor", 0, pid=2002, **self.ED)
+        self.win.z.remove(early)
+        self.win.z.insert(0, early)  # (but it is on top now: z-order alone would count it last)
+        m.sync()
+        self.assertLess(m._places.bound_entry(early).Order, m._places.bound_entry(late).Order)
+
+    def test_a_restart_of_displaydesktop_alone_keeps_the_windows_order(self):
+        a = self.win.add("A - Editor", 0, **self.ED)
+        m = self.manager()
+        m.sync()
+        b = self.win.add("B - Editor", 0, **self.ED)  # opened after a
+        m.sync()
+        m.create_desktop_and_switch(D1)
+        m.move_window_to_desktop(a, D1, 1)  # a on desktop 2, b on desktop 1: desktop order is b, a
+        m.switch_to(D1, 0)
+        m.snapshot()
+        m.restore_all()
+        self.new_process()
+        m2 = self.manager()
+        m2.sync()
+        self.win.advance(3000)
+        m2.sync()
+        self.assertLess(m2._places.bound_entry(a).Order, m2._places.bound_entry(b).Order,
+                        "same windows: their numbers kept, not counted again in desktop order")
+        c = self.win.add("C - Editor", 0, **self.ED)
+        m2.sync()
+        self.assertGreater(m2._places.bound_entry(c).Order, m2._places.bound_entry(b).Order,
+                           "a window opened since counts after them")
+
+    def test_the_first_and_second_window_take_the_first_and_second_place_whatever_their_titles(self):
+        m2 = self.two_places_then_reboot()
+        a = self.win.add("Notes - Editor", 0, rect=(300, 300, 700, 700), **self.ED)  # the second one's title
+        m2.sync()
+        b = self.win.add("Report - Editor", 0, rect=(300, 300, 700, 700), **self.ED)
+        m2.sync()
+        self.assertEqual((self.where(m2, a), self.win.windows[a].rect), ((D1, 1), self.P1), "the first: P1")
+        self.assertEqual((self.where(m2, b), self.win.windows[b].rect), ((D2, 0), self.P2), "the second: P2")
+
+    def test_a_third_window_with_two_places_stays_where_it_opened(self):
+        m2 = self.two_places_then_reboot()
+        a = self.win.add("A - Editor", 0, rect=(300, 300, 700, 700), **self.ED)
+        b = self.win.add("B - Editor", 0, rect=(300, 300, 700, 700), **self.ED)
+        m2.sync()
+        c = self.win.add("C - Editor", 1, rect=(2300, 300, 2700, 700), **self.ED)  # opens on display 2
+        m2.sync()
+        self.assertEqual([self.where(m2, h) for h in (a, b)], [(D1, 1), (D2, 0)])
+        self.assertEqual(self.where(m2, c), (D2, 0), "no place left: on its display's shown desktop")
+        self.assertEqual(self.win.windows[c].rect, (2300, 300, 2700, 700), "not moved")
+        self.assertTrue(self.visible(c))
+
+    def test_a_window_that_opens_first_takes_the_first_place_wherever_it_opens(self):
+        m2 = self.two_places_then_reboot()
+        c = self.win.add("C - Editor", 1, rect=(2300, 300, 2700, 700), **self.ED)  # first, on display 2
+        m2.sync()
+        a = self.win.add("A - Editor", 0, rect=(300, 300, 700, 700), **self.ED)
+        m2.sync()
+        b = self.win.add("B - Editor", 0, rect=(300, 300, 700, 700), **self.ED)
+        m2.sync()
+        self.assertEqual((self.where(m2, c), self.win.windows[c].rect), ((D1, 1), self.P1), "first seen: P1")
+        self.assertEqual((self.where(m2, a), self.win.windows[a].rect), ((D2, 0), self.P2))
+        self.assertEqual((self.where(m2, b), self.win.windows[b].rect), ((D1, 0), (300, 300, 700, 700)),
+                         "the third: stays where it opened")
+        self.assertTrue(self.visible(b))
+
+    def test_windows_seen_together_are_counted_from_the_bottom_of_the_z_order(self):
+        # Open before DisplayDesktop started: the lowest in z-order is the oldest, first seen
+        first = self.win.add("Older - Editor", 0, rect=self.P1, **self.ED)
+        second = self.win.add("Newer - Editor", 1, rect=self.P2, **self.ED)
+        self.win.z = [first, second]  # (first on top: it is the newer one)
+        m = self.manager()
+        m.sync()
+        self.assertEqual(m.save_desktops(), 2)
+        with open(self.layout_file, encoding="utf-8") as fh:
+            order = {e["Left"]: e["Order"] for e in all_windows(json.load(fh))}
+        self.assertLess(order[self.P2[0]], order[self.P1[0]], "the lower window was seen first")
+        m.restore_all()
+        self.win.reboot()
+        m2 = self.manager()
+        n = self.win.add("Any - Editor", 0, rect=(300, 300, 700, 700), **self.ED)
+        m2.sync()
+        self.assertEqual(self.win.windows[n].rect, self.P2, "the first to open: the place of the one seen first")
+
+    def test_store_apps_are_counted_per_title(self):
+        # Photos twice (P1, P2), then Calculator; after the reboot Calculator opens first
+        photos1 = self.win.add("Photos", 0, rect=self.P1, **self.STORE)
+        photos2 = self.win.add("Photos", 1, rect=self.P2, **self.STORE)
+        calc_place = (1000, 100, 1300, 600)
+        calc = self.win.add("Calculator", 0, rect=calc_place, **self.STORE)
+        m = self.manager()
+        m.sync()
+        m.create_desktop_and_switch(D1)
+        m.move_window_to_desktop(photos1, D1, 1)
+        m.move_window_to_desktop(calc, D1, 1)
+        m.switch_to(D1, 0)
+        self.assertTrue(self.visible(photos2))
+        m.restore_all()
+        self.win.reboot()
+        m2 = self.manager()
+        c = self.win.add("Calculator", 0, rect=(300, 300, 600, 700), **self.STORE)
+        m2.sync()
+        p1 = self.win.add("Photos", 0, rect=(300, 300, 600, 700), **self.STORE)
+        m2.sync()
+        p2 = self.win.add("Photos", 0, rect=(300, 300, 600, 700), **self.STORE)
+        m2.sync()
+        self.assertEqual((self.where(m2, c), self.win.windows[c].rect), ((D1, 1), calc_place),
+                         "its own app's place, not the first Photos place")
+        self.assertEqual((self.where(m2, p1), self.win.windows[p1].rect), ((D1, 1), self.P1))
+        self.assertEqual((self.where(m2, p2), self.win.windows[p2].rect), ((D2, 0), self.P2))
+        other = self.win.add("Settings", 0, rect=(300, 300, 600, 700), **self.STORE)
+        m2.sync()
+        self.assertEqual((self.where(m2, other), self.win.windows[other].rect), ((D1, 0), (300, 300, 600, 700)),
+                         "another Store app: no place of its own, stays where it opened")
+
+    def test_load_uses_the_same_rule(self):
+        first = self.win.add("Report - Editor", 0, rect=self.P1, **self.ED)
+        second = self.win.add("Notes - Editor", 1, rect=self.P2, **self.ED)
+        m = self.manager()
+        m.sync()
+        m.create_desktop_and_switch(D1)
+        m.move_window_to_desktop(first, D1, 1)
+        m.switch_to(D1, 0)
+        self.assertEqual(m.save_desktops(), 2)
+        for h in (first, second):
+            self.win.close(h)
+        m.sync()
+        self.win.advance(STARTUP_GRACE_MS + 1)
+        a = self.win.add("Notes - Editor", 0, rect=(300, 300, 700, 700), **self.ED)  # the second one's title
+        m.sync()
+        b = self.win.add("Report - Editor", 0, rect=(400, 400, 800, 800), **self.ED)
+        m.sync()
+        c = self.win.add("Draft - Editor", 0, rect=(500, 500, 900, 900), **self.ED)
+        m.sync()
+        self.assertEqual([self.where(m, h) for h in (a, b, c)], [(D1, 0)] * 3, "after the grace: where they open")
+        m.load_desktops()
+        self.assertEqual((self.where(m, a), self.win.windows[a].rect), ((D1, 1), self.P1), "Load: the first, P1")
+        self.assertEqual((self.where(m, b), self.win.windows[b].rect), ((D2, 0), self.P2), "the second, P2")
+        self.assertEqual((self.where(m, c), self.win.windows[c].rect), ((D1, 0), (500, 500, 900, 900)),
+                         "the third: no saved place, left where it is")
+
+    def test_the_order_is_written_and_read_back_not_the_file_order(self):
+        # A file whose second record was seen first (Order 3 before Order 9): the first window to open
+        # takes the Order 3 place
+        rows = [dict(Exe=self.ED["exe"], Class=self.ED["cls"], Display="MON-A", Desktop=1, ShowCmd=1,
+                     Left=self.P1[0], Top=self.P1[1], Right=self.P1[2], Bottom=self.P1[3], Order=9),
+                dict(Exe=self.ED["exe"], Class=self.ED["cls"], Display="MON-B", Desktop=0, ShowCmd=1, WorkLeft=1920,
+                     Left=self.P2[0], Top=self.P2[1], Right=self.P2[2], Bottom=self.P2[3], Order=3)]
+        from fakes import places_data
+        with open(os.path.join(self.dir, PLACES_FILE), "w", encoding="utf-8") as fh:
+            json.dump(dict(places_data(rows, {"MON-A": 2}, Updated=1, UptimeMs=1), Format=paths.FORMAT), fh)
+        m = self.manager()
+        a = self.win.add("A - Editor", 0, rect=(300, 300, 700, 700), **self.ED)
+        m.sync()
+        b = self.win.add("B - Editor", 0, rect=(300, 300, 700, 700), **self.ED)
+        m.sync()
+        self.assertEqual((self.where(m, a), self.win.windows[a].rect), ((D2, 0), self.P2), "Order 3 first")
+        self.assertEqual((self.where(m, b), self.win.windows[b].rect), ((D1, 1), self.P1))
+        # Recorded with the order they were seen in: a restart keeps it
+        self.win.advance(STARTUP_GRACE_MS + 1)
+        m.sync()
+        with open(os.path.join(self.dir, PLACES_FILE), encoding="utf-8") as fh:
+            order = {e["Left"]: e["Order"] for e in all_windows(json.load(fh))}
+        self.assertLess(order[self.P2[0]], order[self.P1[0]], "a (seen first) recorded before b")
+        m.restore_all()
+        self.win.reboot()
+        m2 = self.manager()
+        n = self.win.add("N - Editor", 0, rect=(300, 300, 700, 700), **self.ED)
+        m2.sync()
+        self.assertEqual(self.win.windows[n].rect, self.P2, "after the next restart too")
 
 
 class ThreeOfAKind(Base):
     """Three windows of the same app (the code takes any number), moved around a lot, then brought
-    back after a crash and after a reboot. Order of evidence: the same window, the same app
-    instance (process), the title (exact, then its parts), then any window of that app. Windows
-    that nothing tells apart (three "Untitled - Notepad") still each get a place of their own: the
-    tiles come back as tiles, never stacked on one spot."""
+    back after a crash and after a reboot. The same window (same boot: handle and process) gets its
+    own record; any other by count, never by title: the first to open takes the place of the one
+    first seen last time, and so on. So the tiles come back as tiles, never stacked on one spot."""
     NOTEPAD = dict(exe=r"C:\Windows\System32\notepad.exe", cls="Notepad")
     STACKED = (400, 300, 1000, 800)  # where Windows opens all of them after a reboot
 
@@ -1572,9 +1734,9 @@ class ThreeOfAKind(Base):
             with open(os.path.join(self.dir, PLACES_FILE), "w", encoding="utf-8") as fh:
                 fh.write(snapshot)  # same starting point for the other order
 
-    # ---- B: documents: the title tells each one apart
+    # ---- B: documents: their titles change nothing, the order they open in decides
 
-    def test_documents_each_come_back_to_their_own_place(self):
+    def test_documents_come_back_by_the_order_they_open_in(self):
         titles = ["a.txt - Notepad", "*b.txt - Notepad", "c.txt - Notepad"]  # b has unsaved changes
         wins = [self.win.add(t, 0, pid=7001 + i, **self.NOTEPAD) for i, t in enumerate(titles)]
         m = self.manager()
@@ -1583,19 +1745,18 @@ class ThreeOfAKind(Base):
         self.m = m
         for _ in self.shuffle_around(wins):
             pass
-        final = {t: self.state(m, h) for t, h in zip(["a", "b", "c"], wins)}
+        final = [self.state(m, h) for h in wins]  # (in the order they were first seen: a, b, c)
         m.restore_all()
         self.win.reboot()
         m2 = self.manager()
-        # reopened stacked, in the opposite order, b saved meanwhile (no "*")
-        new = dict(zip(["c", "b", "a"], self.stacked(["c.txt - Notepad", "b.txt - Notepad", "a.txt - Notepad"],
-                                                       [7201, 7202, 7203])))
+        # reopened stacked, c's file first, then b's, then a's: by count, c's window takes a's place
+        new = self.stacked(["c.txt - Notepad", "b.txt - Notepad", "a.txt - Notepad"], [7201, 7202, 7203])
         m2.sync()
-        self.assertEqual({k: self.state(m2, h) for k, h in new.items()}, final, "each file in its own place")
+        self.assertEqual([self.state(m2, h) for h in new], final, "the first to open: the first one's place")
 
-    # ---- C: the same app instance beats the title
+    # ---- C: windows recreated in the same boot (new handles): by count too
 
-    def test_the_same_instance_beats_the_title(self):
+    def test_recreated_windows_take_the_places_in_the_order_they_open(self):
         wins = [self.win.add(t, 0, pid=p, **self.NOTEPAD)
                 for t, p in (("a.txt - Notepad", 7001), ("b.txt - Notepad", 7002), ("c.txt - Notepad", 7003))]
         m = self.manager()
@@ -1605,15 +1766,15 @@ class ThreeOfAKind(Base):
         for _ in self.shuffle_around(wins):
             pass
         final = {self.win.windows[h].pid: self.state(m, h) for h in wins}
-        # DisplayDesktop crashes; each Notepad then recreates its window (new handle, same process)
-        # with another file open: the titles now point at the wrong places, the processes do not
+        # DisplayDesktop crashes; each Notepad then recreates its window (new handle, same process),
+        # in the same order, with another file open: the titles point at other places, the order does not
         for h in wins:
             self.win.close(h)
         m2 = self.manager()
         again = self.stacked(["b.txt - Notepad", "c.txt - Notepad", "a.txt - Notepad"], [7001, 7002, 7003])
         m2.sync()
         self.assertEqual({self.win.windows[h].pid: self.state(m2, h) for h in again}, final,
-                         "each instance back in its own place, whatever file it shows now")
+                         "each back in the place of its rank, whatever file it shows now")
 
 
 class LoadBrowserWindows(Base):
@@ -2036,9 +2197,10 @@ class LoadFloatingWindows(Base):
         m.load_desktops()
         self.assertFalse(any(palette in s for dev in (D1, D2) for s in m.desktops_of(dev)),
                          "the palette is not a desktop window")
-        self.assertFalse(self.visible(palette), "and stays hidden with its main window")
+        self.assertIn(m2, m.desktops_of(D1)[0], "by count: the program's only window takes its first saved place")
+        self.assertTrue(self.visible(m2) and self.visible(palette), "the palette comes with its main window")
         m.switch_to(D1, 1)
-        self.assertTrue(self.visible(m2) and self.visible(palette), "it comes back with its main window")
+        self.assertFalse(self.visible(m2) or self.visible(palette), "and hides with it")
 
 
 class SameBoot(Base):
@@ -2342,8 +2504,8 @@ class PlacesWrites(Base):
         self.assertEqual(set(self.written[-1]["Setups"][0]), {"Displays", "Windows", "Desktops"})
         self.assertEqual(self.written[-1]["Setups"][0]["Displays"], list(SETUP))
         self.assertEqual(set(rec[b]), {"Exe", "Class", "TitleHash", "Display", "Desktop", "WorkLeft", "WorkTop",
-                                       "ShowCmd", "Left", "Top", "Right", "Bottom", "TitleParts", "Closed", "Handle",
-                                       "Pid"})
+                                       "ShowCmd", "Left", "Top", "Right", "Bottom", "Order", "Closed", "Handle",
+                                       "Pid", "Command", "App"})
         self.assertEqual(all_desktops(self.written[-1]), {"MON-A": 1, "MON-B": 1})
         self.win.windows[b].title = "Changed - App"
         self.run_syncs(m, 4)

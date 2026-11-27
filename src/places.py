@@ -13,14 +13,14 @@ tells at the next start which records were still current when DisplayDesktop sto
 Several windows of one app (two browser windows on different displays and desktops) each go back
 to their own place: within the same boot (a crash, run restart) the windows still exist, so each
 record also keeps the window's handle and process and a window is matched to its own record first.
-After a reboot the handles are new: then the exact title wins, then a place on the monitor the
-window opened on, then the nearest position (layout.WindowLayout.match).
+After a reboot the handles are new: then windows are matched by count (layout.WindowLayout.assign):
+an app's first window takes its first window's place, and so on.
 
 Rewritten when windows open, close or change desktop or monitor, and every REFRESH_MS otherwise
 (positions included), but only when something changed; "Updated" at least every HEARTBEAT_S.
 
 Separate from the saved desktops (layout.json, "Save" / "Load"), which this
-never reads or changes. Same matching and window identity as layout.py (no titles, only hashes).
+never reads or changes. Same matching and window identity as layout.py.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ import time
 from . import native as N
 from . import paths
 from .paths import PLACES_FILE, is_int, write_json
-from .layout import LOOSE, Entry, Place, WindowLayout, read_setups
+from .layout import Entry, Place, WindowLayout, read_setups, seed_order
 
 CLOSED_KEEP_S = 30
 HEARTBEAT_S = 60
@@ -44,7 +44,7 @@ def same_boot(uptime_ms, written_s, win) -> bool:
     match now's within BOOT_TOLERANCE_S; an uptime check alone accepts an older boot whenever the
     app starts later in the new boot than the file was written in the old one. Without the wall
     time (older files) only the uptime is checked. A wrong "no" is harmless: windows are then
-    matched by program and title instead of by handle."""
+    matched by program and count instead of by handle."""
     if not (isinstance(uptime_ms, int) and not isinstance(uptime_ms, bool)):
         return False
     now_tick = win.tick_count64()
@@ -67,6 +67,12 @@ class WindowPlaces(WindowLayout):
         self._last_write = 0.0
         self._last_payload: tuple | None = None  # what the last write held (None: none yet, or write_next)
         self._ids: dict[int, tuple[int, int]] = {}  # id(entry) -> (window handle, process id)
+        # id(entry) -> (its program's command line, its process id when recorded: 0 if not known, its
+        # packaged app's id: "" for other programs)
+        self._cmds: dict[int, tuple[str, int, str]] = {}
+        self._app_cache: dict[int, str] = {}  # window -> its packaged app's id (read once per window)
+        self._cmd_cache: dict[tuple[int, int], str] = {}  # (pid, start time) -> command line (once per process)
+        self.last_boot = False  # read from a file another boot wrote (Windows restarted since)
         # setup -> display name -> number of desktops (empty ones count too)
         self._counts: dict[tuple, dict[str, int]] = {}
         self._whole_setup = False  # assign_setup: every open place of the setup is a candidate
@@ -88,6 +94,7 @@ class WindowPlaces(WindowLayout):
                 self._counts[setup] = counts
         # Handles are only meaningful within the boot that wrote them (they are reused later)
         this_boot = same_boot(data.get("UptimeMs"), updated if updated else None, self._win)
+        self.last_boot = not this_boot and bool(pairs)
         for e, raw in pairs:
             closed = raw.get("Closed") or 0
             if isinstance(closed, (int, float)) and closed and updated - closed > CLOSED_KEEP_S:
@@ -96,6 +103,11 @@ class WindowPlaces(WindowLayout):
             handle, pid = raw.get("Handle"), raw.get("Pid")
             if this_boot and isinstance(handle, int) and isinstance(pid, int) and handle and pid:
                 self._ids[id(e)] = (handle, pid)
+            cmd, app = raw.get("Command"), raw.get("App")
+            cmd = cmd if isinstance(cmd, str) else ""
+            app = app if isinstance(app, str) else ""
+            if cmd or app:
+                self._cmds[id(e)] = (cmd, pid if is_int(pid) else 0, app)
         self._entries = keep
         self._pending = {id(e) for e in keep}
 
@@ -116,12 +128,9 @@ class WindowPlaces(WindowLayout):
         finally:
             self._whole_setup = False
 
-    def _pid_of(self, e: Entry) -> int:
-        return self._ids.get(id(e), (0, 0))[1]  # only known within the boot that recorded it
-
-    def assign(self, windows: list[int], level: int = LOOSE) -> list[tuple[int, Entry]]:
-        # The same window (same boot, same handle and process) first: its own record, whatever
-        # its title; then the usual matching for the others
+    def assign(self, windows: list[int]) -> list[tuple[int, Entry]]:
+        # The same window (same boot, same handle and process) first: its own record; then the
+        # others by count (WindowLayout.assign)
         result = []
         bound = {id(x) for x in self._bound.values()}
         by_key: dict[tuple[int, int], Entry] = {}  # (handle, pid) -> free entry, built once
@@ -134,11 +143,51 @@ class WindowPlaces(WindowLayout):
             e = by_key.pop((h, self._win.get_pid(h)), None)
             if e is not None:
                 self._bound[h] = e
+                seed_order(h, e.Order, self._win)  # (its own number back: not renumbered by the next record)
                 result.append((h, e))
-        result += super().assign([h for h in windows if h not in self._bound], level)
+        result += super().assign([h for h in windows if h not in self._bound])
         for _, e in result:
             self._pending.discard(id(e))
         return result
+
+    def _command_of(self, pid: int) -> str:
+        """The command line that started the process (Restore Applications On Restart), read once per process."""
+        if not pid:
+            return ""
+        key = (pid, self._win.process_started(pid))  # (a pid can be used again; with its start time, never)
+        cmd = self._cmd_cache.get(key)
+        if cmd is None:
+            if len(self._cmd_cache) >= 256:
+                self._cmd_cache.clear()  # (closed processes' lines go now and then)
+            cmd = self._cmd_cache[key] = self._win.process_command_line(pid)
+        return cmd
+
+    def _app_of(self, h: int) -> str:
+        """The window's packaged app id (Store apps, packaged programs), read once per window."""
+        app = self._app_cache.get(h)
+        if app is None:
+            if len(self._app_cache) >= 1024:
+                w = self._win
+                self._app_cache = {k: v for k, v in self._app_cache.items() if w.is_window(k)}
+            app = self._win.window_app_id(h)
+            if app or self._win.get_class(h) != "ApplicationFrameWindow":
+                self._app_cache[h] = app  # (a Store app's frame without its app inside yet: asked again)
+        return app
+
+    def apps_to_restart(self) -> list[tuple[str, str, str]]:
+        """After a Windows restart: (program, command line, packaged app id) of each app that had
+        windows in the setup in use when it was last recorded, once per process (a packaged app:
+        once per app)."""
+        if not self.last_boot:
+            return []
+        out, seen = [], set()
+        for e in self._candidates():
+            cmd, pid, app = self._cmds.get(id(e), ("", 0, ""))
+            key = ("app", app) if app else pid or cmd
+            if (app or (cmd and e.Exe)) and key not in seen:
+                seen.add(key)
+                out.append((e.Exe, cmd, app))
+        return out
 
     def desktop_count(self, display: str) -> int:
         """How many desktops the display had last time in the setup in use (0 if unknown): empty
@@ -180,10 +229,13 @@ class WindowPlaces(WindowLayout):
             if e is not None:
                 entries.append(e)
                 bound[p.window] = e
-                self._ids[id(e)] = (p.window, w.get_pid(p.window))
+                pid = w.get_pid(p.window)
+                self._ids[id(e)] = (p.window, pid)
+                self._cmds[id(e)] = (self._command_of(pid), pid, self._app_of(p.window))
         self._entries, self._bound = entries, bound
         kept = {id(e) for e in entries}
         self._ids = {i: v for i, v in self._ids.items() if i in kept}
+        self._cmds = {i: v for i, v in self._cmds.items() if i in kept}
         if counts:
             self._counts[setup] = dict(counts)
         self._write_places(now, force=False)
@@ -199,6 +251,7 @@ class WindowPlaces(WindowLayout):
             # (also the ids: a dropped entry's id can be reused by a new entry, which must not inherit
             # its window handle and process)
             self._ids = {i: v for i, v in self._ids.items() if i in kept}
+            self._cmds = {i: v for i, v in self._cmds.items() if i in kept}
             self._pending &= kept
             self._write_places(now)
 
@@ -233,19 +286,20 @@ class WindowPlaces(WindowLayout):
         rows = []
         # A last-session place of a window this run has recorded too (same window, same boot: read
         # late) is kept in memory for the manager to put it back, but never written twice
-        ids, pending, closed = self._ids, self._pending, self._closed
+        ids, pending, closed, cmds = self._ids, self._pending, self._closed, self._cmds
         current = {ids[i] for i in map(id, self._entries) if i not in pending and i in ids}
         for e in self._entries:
             i = id(e)
             if i in pending and ids.get(i) in current:
                 continue
             handle, pid = ids.get(i, (0, 0))
-            rows.append((e, closed.get(i, 0), handle, pid))
+            cmd, cmd_pid, app = cmds.get(i, ("", 0, ""))
+            rows.append((e, closed.get(i, 0), handle, pid or cmd_pid, cmd, app))
         # What would be written (every value of every record, the counts), compared without building
         # the JSON: it is only made when written
         payload = (tuple((e.Setup, e.Exe, e.Class, e.TitleHash, e.Display, e.Desktop, e.WorkLeft, e.WorkTop,
-                          e.ShowCmd, e.Left, e.Top, e.Right, e.Bottom, tuple(e.TitleParts), c, h, p)
-                         for e, c, h, p in rows),
+                          e.ShowCmd, e.Left, e.Top, e.Right, e.Bottom, e.Order, c, h, p, cmd, app)
+                         for e, c, h, p, cmd, app in rows),
                    tuple(sorted((k, tuple(sorted(v.items()))) for k, v in self._counts.items())))
         if not force and payload == self._last_payload and now - self._last_write < HEARTBEAT_S:
             return  # nothing changed: no disk write
@@ -254,9 +308,9 @@ class WindowPlaces(WindowLayout):
         self._last_write = now
         # {"Updated", "UptimeMs", "Setups": [{"Displays", "Windows", "Desktops"}]}
         setups = {}
-        for e, c, h, p in rows:
+        for e, c, h, p, cmd, app in rows:
             setups.setdefault(e.Setup, {"Displays": list(e.Setup), "Windows": []})["Windows"].append(
-                dict(e.to_json(), Closed=c, Handle=h, Pid=p))
+                dict(e.to_json(), Closed=c, Handle=h, Pid=p, Command=cmd, App=app))
         for key, counts in self._counts.items():
             setups.setdefault(key, {"Displays": list(key), "Windows": []})["Desktops"] = counts
         if write_json(self._file, {"Updated": now, "UptimeMs": self._win.tick_count64(),

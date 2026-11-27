@@ -566,7 +566,10 @@ class RecoveryWindow(_ReportDialog):
             elif cid == ID_QUIT:
                 self.finish("quit" if self.can_quit else "continue")
             elif cid == ID_RECREATE:
-                self.finish("recreate")  # (every settings file removed and made new: tray.recreate_files)
+                # (asks first, No the default; every settings file removed and made new: tray.recreate_files)
+                if G.message_box(L.t("msg.recreateConfirm"), G.MB_YESNO | G.MB_ICONQUESTION
+                                 | G.MB_DEFBUTTON2) == G.IDYES and self.hwnd:
+                    self.finish("recreate")
             elif cid == ID_EYE:
                 self.toggle_key_shown()
             elif cid == ID_RESTORE and self._on_restore is not None:

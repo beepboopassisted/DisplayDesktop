@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 
+from src import layout
 from src import native as N
 
 
@@ -41,6 +42,9 @@ class FakeWin:
     WS_CAPTION = N.WS_CAPTION
 
     def __init__(self):
+        # A new simulated Windows reuses the handles of the last one (0x1000...): when DisplayDesktop
+        # first saw a window (layout.order_of, kept per handle) starts empty
+        layout._order.clear()
         self.windows: dict[int, FakeWindow] = {}
         self.z: list[int] = []
         self.screen_list: list[FakeScreen] = [
@@ -327,6 +331,24 @@ class FakeWin:
 
     def wall_time(self):
         return 1_700_000_000 + (self.tick + getattr(self, "wall_shift", 0)) / 1000
+
+    def process_command_line(self, pid):
+        """A process's command line (command_lines, else "": not readable)."""
+        return getattr(self, "command_lines", {}).get(pid, "")
+
+    def window_app_id(self, h):
+        """A packaged app's id (app_ids by window, else "": not packaged)."""
+        return getattr(self, "app_ids", {}).get(h, "")
+
+    def running_app_ids(self):
+        return {a for h, a in getattr(self, "app_ids", {}).items() if h in self.windows}
+
+    def start_app(self, app_id):
+        self.started_apps = getattr(self, "started_apps", []) + [app_id]
+
+    def running_programs(self):
+        """Lowercased program paths running now (the windows' programs)."""
+        return {w.exe.lower() for w in self.windows.values()}
 
     def process_started(self, pid):
         """A process's start time: unique to that process in that boot (0 = unknown pid)."""

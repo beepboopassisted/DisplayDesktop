@@ -22,7 +22,7 @@ from collections.abc import Callable
 
 from . import native as N
 from .last_shown import LastShown
-from .layout import Entry, Place, WindowLayout, setup_key
+from .layout import Entry, Place, WindowLayout, number_new, setup_key
 from .places import REFRESH_MS, WindowPlaces, same_boot
 from . import datafolder, paths
 from .paths import JOURNAL_FILE, data_dir, is_int, write_json
@@ -31,6 +31,8 @@ MAX_DESKTOPS_PER_MONITOR = 10  # a safety cap (a damaged file cannot create thou
 STARTUP_GRACE_MS = 120_000
 MONITOR_ID_REFRESH_MS = 30_000
 SETUP_SETTLE_MS = 2000  # displays attached or detached: their setup's places apply once unchanged this long
+RELAUNCH_AFTER_MS = 5000  # Restore Applications On Restart: apps start again this long after DisplayDesktop does
+CREATE_NEW_CONSOLE = 0x10  # (a console program gets a console of its own; windowed ones don't care)
 CAPTURE_BUDGET_MS = 50  # previews captured per switch at most this long (only windows without one)
 PREVIEW_FRESH_S = 5.0  # a window in use gets a new background preview at most this often
 PREVIEW_MAX_AGE_S = 60.0  # any shown window's preview is taken again in the background when older
@@ -209,6 +211,11 @@ class DesktopManager:
         self._displaced: dict[int, Displaced] = {}
         self._ended = False  # end() ran: no more changes (see end)
         self._start_tick = win.tick_count64()
+        # Restore Applications On Restart (the tray sets it from the setting): after a Windows restart, the
+        # apps that were open start again, once, RELAUNCH_AFTER_MS after the start (_relaunch_apps)
+        self.restore_apps = False
+        self._relaunched = False
+        self.log: Callable[[str], None] = lambda text: None  # (the tray: the console)
         # Events: switch_starting(device, old, new) before anything is hidden (animation screenshot);
         # desktop_switched(SwitchInfo) after a switch; edge_reached(device, direction) when there is
         # no desktop further in that direction (nothing changes; the tray shows a bounce).
@@ -354,12 +361,45 @@ class DesktopManager:
         if fg and fg != w.get_foreground() and w.is_window(fg) and fg not in self._hidden and w.is_window_visible(fg):
             w.set_foreground(fg)  # (the switches gave focus to their desktops' windows: it stays with the one in use)
 
+    def _relaunch_apps(self) -> None:
+        """Restore Applications On Restart: Windows restarted since places.json was written (never after
+        a restart of DisplayDesktop alone), so each app that had windows in this display setup is
+        started again, unless it already runs (Windows or a startup entry started it again): a
+        packaged app (Store apps, packaged programs) by its app id, as the Start menu does, once per
+        app; any other program with its own command line, once per process. Programs whose command
+        line could not be read (elevated) are not. Their windows then go back to their places as
+        they open (the startup grace). Never in test mode."""
+        apps = self._places.apps_to_restart()
+        if not apps or paths.is_test_mode():
+            return
+        from .layout import SHARED_HOSTS
+        import subprocess
+        w = self._win
+        running = w.running_programs()
+        running_apps = w.running_app_ids() if any(app for _, _, app in apps) else set()
+        for exe, cmd, app in apps:
+            name = app.split("!")[-1] if app else os.path.basename(exe)
+            try:
+                if app:
+                    if app in running_apps:
+                        continue
+                    w.start_app(app)
+                else:
+                    if exe.lower() in running or os.path.basename(exe).lower() in SHARED_HOSTS \
+                            or not os.path.isfile(exe):
+                        continue
+                    subprocess.Popen(cmd, cwd=os.path.dirname(exe), close_fds=True,
+                                     creationflags=CREATE_NEW_CONSOLE)
+                self.log(f"Restore Applications On Restart: started {name}.")
+            except (OSError, ValueError) as exc:
+                self.log(f"Restore Applications On Restart: {name} did not start ({exc}).")
+
     def _restore(self, windows: list[int], store: WindowLayout) -> None:
         """Puts windows back on their monitor, desktop and position, where the store (last known
         places at startup, saved desktops on "Load") has a place for them; the others are
         left to normal adoption (they stay where Windows created them). Placed quietly (no switch).
-        One assign() over all windows: its ranking already puts same process before exact title
-        before shared title parts before any window of the app (layout.WindowLayout.assign)."""
+        One assign() over all windows: each app's windows take its places by count, first to first
+        (layout.WindowLayout.assign)."""
         # Not responding: placing it would block (and it is not bound, so not half-restored)
         todo = [h for h in windows if not store.is_bound(h) and not self._win.is_hung(h)]
         if not todo:
@@ -1358,8 +1398,8 @@ class DesktopManager:
 
         # Windows seen for the first time. Right after DisplayDesktop starts (grace time) they go
         # back to their last known place: open since before, or reopened after a crash or restart.
-        # Later, a window opens where Windows creates it. Exact matches first, so a loose match
-        # never takes a place another window matches exactly.
+        # Later, a window opens where Windows creates it. Each app's windows take its places by
+        # count (first to first); one with no place left stays where Windows opened it.
         top_level = w.enum_windows()
         if self._places.take_late_read() and self._in_startup_grace:
             # places.json could not be read at start and is read now: what a start does with it is
@@ -1426,8 +1466,18 @@ class DesktopManager:
 
         if self._setup_due and w.tick_count64() - self._setup_changed_at >= SETUP_SETTLE_MS:
             self._apply_setup()
+        if not self._relaunched and w.tick_count64() - self._start_tick >= RELAUNCH_AFTER_MS:
+            self._relaunched = True  # (once, early in the startup grace: their windows go back to their places)
+            if self.restore_apps:
+                self._relaunch_apps()
         self._retry_refused_shows()
         self._show_saved_desktops()
+        # Windows new on a desktop get their spawn number oldest first (reverse z-order) before a record
+        # numbers them in desktop order (layout.order_of: an app's windows go back by count)
+        seen_before = self._seen
+        new = {h for st in self._monitors.values() for s in st.desktops for h in s if h not in seen_before}
+        if new:
+            number_new([h for h in reversed(top_level) if h in new], w)
         self._persist_hidden()
         # Writes that could not be made (the folder was paused or briefly unwritable) are made now
         self._layout.flush()

@@ -420,7 +420,7 @@ class TrayStartup(unittest.TestCase):
     after the first sync does (nothing real is created)."""
 
     def start(self, fail_after_sync: bool = False, error_during_sync: bool = False, unreachable=None,
-              recovery_quit: bool = False):
+              recovery_quit: bool = False, values=None):
         order, seen_choice = [], []
         holder = {}
         mgr = mock.Mock()
@@ -444,7 +444,7 @@ class TrayStartup(unittest.TestCase):
             if fail_after_sync:
                 raise RuntimeError("failed after the first sync")
 
-        values = {"UseGpu": True}
+        values = {"UseGpu": True} if values is None else values
         events = iter((11, 22))  # the quit event, then the event that stops the quit watcher
         animator = mock.Mock()
         animator.dispose.side_effect = lambda: order.append("slides stopped")
@@ -500,6 +500,11 @@ class TrayStartup(unittest.TestCase):
         # the first sync can already switch desktops (a desktop shown last time) and slide
         order, _, _ = self.start()
         self.assertLess(order.index("gpu set up"), order.index("first sync"), order)
+
+    def test_restore_applications_on_restart_follows_the_setting(self):
+        for on in (True, False):
+            _, _, app = self.start(values={"UseGpu": True, "RestoreApps": on})
+            self.assertIs(app.mgr.restore_apps, on)
 
     def test_a_failure_after_the_first_sync_shows_the_windows_again(self):
         order, _, result = self.start(fail_after_sync=True)

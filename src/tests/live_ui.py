@@ -1,5 +1,5 @@
 """Live UI test: Overview (layout, live previews, snapshots, clicks, drag and drop, "+", menu, scroll,
-Esc, tooltips), the Settings dialog (version link, checkboxes incl. Show Console and Use GPU Acceleration, Clear Desktops, Esc/Enter, test mode), slide animation (refresh-paced) and GDI/USER handle leaks. Runs in-process with real windows
+Esc, tooltips), the Settings dialog (version link, checkboxes incl. Show Console, Use GPU Acceleration and Restore Applications On Restart, Clear Desktops, Esc/Enter, test mode), slide animation (refresh-paced) and GDI/USER handle leaks. Runs in-process with real windows
 (winhelper.py) and a DesktopManager scoped to them, so none of the user's windows are touched.
 
     python -B src/tests/live_ui.py [--frames <folder>]   (saves the animation frames as one PNG)
@@ -1132,6 +1132,21 @@ def main() -> int:
             G.SendMessageW(ctl[SW.ID_GPU], BM_CLICK, 0, None)
             pump(50)
             check(calls[-1:] == [("gpu", True)] and dlg.checked(SW.ID_GPU), "and back on")
+            rows = [N.get_window_rect(ctl[c]) for c in (SW.ID_STARTUP, SW.ID_START_MENU, SW.ID_GPU, SW.ID_RESTORE_APPS)]
+            check(N.get_title(ctl[SW.ID_RESTORE_APPS]) == "Restore Applications On Restart"
+                  and all(r[0] == rows[0][0] for r in rows) and all(a[3] <= b[1] for a, b in zip(rows, rows[1:]))
+                  and rows[-1][3] <= N.get_window_rect(ctl[SW.ID_ADVANCED])[1],
+                  f"Restore Applications On Restart: the 4th option row, under Use GPU Acceleration ({rows})")
+            check(dlg.checked(SW.ID_RESTORE_APPS), "Restore Applications On Restart shows its setting (on)")
+            set_setting.reset_mock()
+            G.SendMessageW(ctl[SW.ID_RESTORE_APPS], BM_CLICK, 0, None)
+            pump(50)
+            check(not dlg.checked(SW.ID_RESTORE_APPS) and set_setting.call_args_list == [mock.call("RestoreApps", False)],
+                  "click Restore Applications On Restart: off, remembered")
+            G.SendMessageW(ctl[SW.ID_RESTORE_APPS], BM_CLICK, 0, None)
+            pump(50)
+            check(dlg.checked(SW.ID_RESTORE_APPS) and set_setting.call_args_list[-1] == mock.call("RestoreApps", True),
+                  "and back on")
             check(not hasattr(SW, "ID_GPU_LIST") and not any(
                       N.get_class(h) == "ComboBox" for h in ctl.values() if h),
                   "no GPU selector (each monitor uses its own GPU)")
@@ -1269,7 +1284,7 @@ def main() -> int:
                 pump(100)
                 check(not is_enabled(dlg._controls[SW.ID_STARTUP]) and not is_enabled(dlg._controls[SW.ID_START_MENU])
                       and is_enabled(dlg._controls[SW.ID_CONSOLE]) and is_enabled(dlg._controls[SW.ID_GPU])
-                      and is_enabled(dlg._controls[SW.ID_RECOVERY]),
+                      and is_enabled(dlg._controls[SW.ID_RESTORE_APPS]) and is_enabled(dlg._controls[SW.ID_RECOVERY]),
                       "test mode: Start With Windows and Add To Start Menu greyed, the rest works")
                 SW.SettingsWindow.close_open()
                 pump(50)
@@ -1590,7 +1605,17 @@ def main() -> int:
             elif how == "close":
                 G.SendMessageW(nw.hwnd, G.WM_CLOSE, 0, 0)
             else:
-                G.SendMessageW(nw._controls[RW.ID_RECREATE], BM_CLICK, 0, None)
+                asked = []
+                for answer_ in (7, G.IDYES):  # (IDNO, then IDYES)
+                    with mock.patch.object(RW.G, "message_box",
+                                           side_effect=lambda t, f: asked.append((t, f)) or answer_):
+                        G.SendMessageW(nw._controls[RW.ID_RECREATE], BM_CLICK, 0, None)
+                        pump(50)
+                    if answer_ == 7:
+                        check(nw.hwnd and nw.result != "recreate", "Recreate Files asks first: No recreates nothing, "
+                                                                   "Recovery stays")
+                check(len(asked) == 2 and asked[0][0] == RW.L.t("msg.recreateConfirm")
+                      and asked[0][1] & G.MB_DEFBUTTON2, "the question: Yes / No, No the default")
             pump(50)
             check(not nw.hwnd and nw.result == want, f"files that can't be read, {how}: {want}")
         # Apply / Default to a folder with files that can't be read: each with why; Close only

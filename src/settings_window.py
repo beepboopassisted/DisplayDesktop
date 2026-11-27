@@ -59,7 +59,9 @@ IN_BOX = (ID_FOLDER_LABEL, ID_FOLDER, ID_BROWSE, ID_DEFAULT, ID_APPLY, ID_ENCRYP
           ID_KEY_REVERT, ID_KEY_APPLY, ID_REMEMBER, ID_CONSOLE, ID_RECOVERY)
 ES_PASSWORD, EM_SETPASSWORDCHAR, PASSWORD_CHAR = 0x0020, 0x00CC, 0x25CF  # ● like every login box
 EYE_SHOWN, EYE_HIDDEN = "", ""  # Segoe Fluent Icons / MDL2: View (eye), Hide (eye with a slash)
-OPTION_ROWS = 3  # checkboxes above the box: Start With Windows, Add To Start Menu, Use GPU Acceleration
+OPTION_ROWS = 4  # checkboxes above the box: Start With Windows, Add To Start Menu, Use GPU Acceleration,
+# Restore Applications On Restart
+ID_RESTORE_APPS = 123
 ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, EN_CHANGE = 0x0080, 0x0200, 0x0300
 MB_YESNO, MB_ICONQUESTION, MB_DEFBUTTON2, IDYES = 0x4, 0x20, 0x100, 6
 MB_YESNOCANCEL, MB_DEFBUTTON3, IDNO = 0x3, 0x200, 7
@@ -275,6 +277,7 @@ class SettingsWindow(G.Window):
             ID_START_MENU: self._set_start_menu,
             ID_CONSOLE: self._set_console,
             ID_GPU: self._set_gpu,
+            ID_RESTORE_APPS: self._set_restore_apps,
             ID_ADVANCED: self._set_advanced,
             ID_ENCRYPT: self._set_encrypt,
             ID_REMEMBER: self._set_remember,
@@ -335,7 +338,8 @@ class SettingsWindow(G.Window):
             rows = [(ID_STARTUP, "settings.startup", startup.is_enabled(), disabled),
                     (ID_START_MENU, "settings.startMenu", menu_on, disabled | (0 if menu_on else no_shortcut)),
                     (ID_GPU, "settings.gpu", settings.get("UseGpu") and self._has_gpu,
-                     0 if self._has_gpu else WS_DISABLED)]
+                     0 if self._has_gpu else WS_DISABLED),
+                    (ID_RESTORE_APPS, "settings.restoreApps", settings.get("RestoreApps"), 0)]
             for i, (cid, key, on, off) in enumerate(rows):
                 self._add("BUTTON", L.t(key), WS_TABSTOP | BS_AUTOCHECKBOX | off, cid,
                           s(16), s(42 + 28 * i), cw - s(32), s(24), font)
@@ -625,7 +629,8 @@ class SettingsWindow(G.Window):
         """The checkboxes show the settings now in use (another folder's data may
         have been chosen)."""
         for cid, on in ((ID_START_MENU, settings.get("StartMenu")), (ID_CONSOLE, console.is_open()),
-                        (ID_GPU, settings.get("UseGpu") and self._has_gpu)):
+                        (ID_GPU, settings.get("UseGpu") and self._has_gpu),
+                        (ID_RESTORE_APPS, settings.get("RestoreApps"))):
             if cid in self._controls:
                 G.SendMessageW(self._controls[cid], BM_SETCHECK, 1 if on else 0, None)
         if ID_ENCRYPT in self._controls:  # (a folder's own files, or a key typed in the popup)
@@ -658,6 +663,13 @@ class SettingsWindow(G.Window):
         settings.set("UseGpu", on)
         gpu.set_enabled(on)
         console.log(f"Use GPU Acceleration: {'on' if on else 'off'} (animations run on {gpu.describe()}).")
+        return on
+
+    @staticmethod
+    def _set_restore_apps(on: bool) -> bool:
+        """After a Windows restart, the apps that were open start again (DesktopManager.relaunch_apps)."""
+        settings.set("RestoreApps", on)  # (read at the next start: the only time it acts)
+        console.log(f"Restore Applications On Restart: {'on' if on else 'off'}.")
         return on
 
     @staticmethod

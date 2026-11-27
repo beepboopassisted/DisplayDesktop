@@ -113,6 +113,42 @@ class Report(unittest.TestCase):
         self.assertEqual(sum(r.kind == "unreadable" for r in report.rows), 2)
 
 
+class RecreateButton(unittest.TestCase):
+    """Recovery's Recreate Files asks first (Yes/No, No the default); only Yes recreates (the result
+    "recreate": tray.recreate_files). Driven without a window: its button's WM_COMMAND."""
+
+    def click(self, answer, hwnd=1):
+        from src import gui as G
+        from src import restore_window as RW
+        rw = RW.RecoveryWindow.__new__(RW.RecoveryWindow)  # (no window made: only its command handling)
+        rw.hwnd = hwnd
+        done = []
+        rw.finish = done.append
+        asked = []
+        with mock.patch.object(RW.G, "message_box", side_effect=lambda text, flags: asked.append((text, flags))
+                               or answer):
+            self.assertEqual(rw.on_message(G.WM_COMMAND, RW.ID_RECREATE, 0), 0)
+        return asked, done
+
+    def test_no_recreates_nothing(self):
+        from src import gui as G
+        asked, done = self.click(G.IDYES + 1)  # (IDNO)
+        self.assertEqual(len(asked), 1, "asked first")
+        text, flags = asked[0]
+        self.assertEqual(text, L.t("msg.recreateConfirm"))
+        self.assertEqual(flags & 0xF, G.MB_YESNO)
+        self.assertTrue(flags & G.MB_DEFBUTTON2, "No is the default")
+        self.assertEqual(done, [], "No: nothing recreated, Recovery stays open")
+
+    def test_yes_recreates(self):
+        from src import gui as G
+        self.assertEqual(self.click(G.IDYES)[1], ["recreate"])
+
+    def test_a_recovery_closed_meanwhile_recreates_nothing(self):
+        from src import gui as G
+        self.assertEqual(self.click(G.IDYES, hwnd=0)[1], [], "(answered after Recovery closed, e.g. run stop)")
+
+
 class StartRestore(unittest.TestCase):
     def test_hidden_windows_before_any_desktop_exists(self):
         win = FakeWin()

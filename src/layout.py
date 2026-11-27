@@ -4,19 +4,17 @@ in the tray menu (save) or erased by "Clear Desktops" (clear); nothing is record
 Used to put windows back when they open again (also after a restart). The desktop each monitor
 showed last is remembered separately, automatically (last_shown.py, showing.json).
 
-HWNDs change when an app or Windows restarts, so a window is recognized by its program path,
-window class and title. Titles are stored only as hashes (they can contain private text): the whole
-title, and each part of it ("Inbox (3) - Webmail - Web Browser" -> "inbox", "webmail", "web
-browser"), so a browser window whose page changed is still recognized by its site.
+HWNDs change when an app or Windows restarts, so windows are matched by program and window class,
+by count: the program's first window goes to the first one's place, the second to the second's,
+whatever their titles (Order: when each window first appeared). Store apps all share one program:
+they are counted per title, kept only as a hash (titles can contain private text).
 Positions are kept in the window's own DPI coordinates (see native.in_window_dpi_context).
-The file format is the same as the C# version's (PascalCase keys), so existing files keep working.
 """
 from __future__ import annotations
 
 import functools
 import json
 import os
-import re
 import time
 from collections import namedtuple
 
@@ -33,15 +31,15 @@ except ImportError:  # (3.12+: _sha2)
         from hashlib import sha256 as _sha256
 
 # Programs whose windows belong to many different apps: every Store app's window (Calculator,
-# Settings, Photos...) is an ApplicationFrameWindow of ApplicationFrameHost.exe. Their windows are
-# matched only by exact title, never loosely, or one app could take another app's saved place.
+# Settings, Photos...) is an ApplicationFrameWindow of ApplicationFrameHost.exe. The title (the app's
+# name) is what tells those apps apart: their windows are counted per title too.
 SHARED_HOSTS = frozenset({"applicationframehost.exe"})
 NOT_READ_YET = -2  # WindowLayout.save: the save there can't be read right now (not written)
 NOT_READABLE = -3  # ... and not because it is in use (a cloud file not available, no read right)
 LOCKED = -4        # ... because it is encrypted (Encrypt Settings) and no known key opens it
 
 _FIELDS = ("Exe", "Class", "TitleHash", "Display", "Desktop", "WorkLeft", "WorkTop", "ShowCmd",
-           "Left", "Top", "Right", "Bottom")
+           "Left", "Top", "Right", "Bottom", "Order")
 
 
 def setup_key(names) -> tuple:
@@ -57,38 +55,28 @@ def read_setups(data: dict) -> list[tuple[tuple, dict]]:
             out.append((setup_key(str(n) for n in s["Displays"] if isinstance(n, str)), s))
     return out
 
-# How sure a match is, from most to least: the windows are matched in this order, each level for
-# all windows before the next, so a weaker match never takes a place a stronger one would get.
-PROCESS = 0  # the same app instance (same process, same boot): it may have recreated its window
-EXACT = 1    # same program, class and title
-SITE = 2     # same program and class, and a title part in common ("Webmail", "report.docx")
-LOOSE = 3    # same program and class only (any window of that app)
-
-
 class Entry:
     """One saved window. Identity semantics: two entries with equal data are still different windows.
     Display: the display's name (unique in its setup); Desktop: desktop index on that display
-    (0-based); WorkLeft/WorkTop: top-left of the display's work area when saved; TitleParts: hashes of
-    the title's parts (title_parts); Setup: the display setup it belongs to (setup_key; not a field:
-    the file groups entries by setup)."""
-    __slots__ = _FIELDS + ("TitleParts", "Setup")
+    (0-based); WorkLeft/WorkTop: top-left of the display's work area when saved; Order: when its window
+    first appeared (order_of; only compared between windows of one program); Setup: the display setup
+    it belongs to (setup_key; not a field: the file groups entries by setup)."""
+    __slots__ = _FIELDS + ("Setup",)
 
     def __init__(self, Exe: str = "", Class: str = "", TitleHash: str = "", Display: str = "",  # noqa: N803
                  Desktop: int = 0, WorkLeft: int = 0, WorkTop: int = 0, ShowCmd: int = 0, Left: int = 0,  # noqa: N803
-                 Top: int = 0, Right: int = 0, Bottom: int = 0, TitleParts: list | None = None,  # noqa: N803
-                 Setup: tuple = ()):  # noqa: N803
+                 Top: int = 0, Right: int = 0, Bottom: int = 0, Order: int = 0, Setup: tuple = ()):  # noqa: N803
         self.Exe, self.Class, self.TitleHash, self.Display = Exe, Class, TitleHash, Display
         self.Desktop, self.WorkLeft, self.WorkTop, self.ShowCmd = Desktop, WorkLeft, WorkTop, ShowCmd
         self.Left, self.Top, self.Right, self.Bottom = Left, Top, Right, Bottom
-        self.TitleParts = [] if TitleParts is None else TitleParts
+        self.Order = Order
         self.Setup = Setup
 
     def __repr__(self) -> str:
         return "Entry(" + ", ".join(f"{k}={getattr(self, k)!r}" for k in self.__slots__) + ")"
 
     def to_json(self) -> dict:
-        # The C# version's keys, then the title parts (unknown keys are ignored by readers)
-        return dict({k: getattr(self, k) for k in _FIELDS}, TitleParts=list(self.TitleParts))
+        return {k: getattr(self, k) for k in _FIELDS}
 
     @staticmethod
     def from_json(d: dict, setup: tuple = ()) -> "Entry":
@@ -102,9 +90,6 @@ class Entry:
                 if isinstance(default, str) and not isinstance(v, str):
                     raise ValueError(f"bad {k}")
                 setattr(e, k, v)
-        parts = d.get("TitleParts")
-        if isinstance(parts, list):
-            e.TitleParts = [p for p in parts if isinstance(p, str)]
         return e
 
 
@@ -120,54 +105,52 @@ def title_hash(title: str) -> str:
     return _sha256(title.encode("utf-8", "surrogatepass")).hexdigest()[:24].upper()
 
 
-_SEPARATORS = re.compile(r"\s+[-\u2013\u2014|\u00b7\u2022]\s+")   # " - ", " – ", " — ", " | ", " · ", " • "
-_COUNTERS = re.compile(r"\(\d+\+?\)|\[\d+\+?\]")              # "(3)", "[12]", "(99+)": unread counts
-_MARKERS = "*\u25cf\u2022 "                                      # unsaved-changes marks: "*a.txt", "\u25cf main.py"
+ORDER_MAX = 1024  # windows whose first sight is kept (closed ones dropped past this)
+# (window, its process) -> when DisplayDesktop first saw it (a counter: the spawn order). With the
+# process: a handle used again by another window never inherits the old one's number
+_order: dict[tuple[int, int], int] = {}
+_next_order = [1]
 
 
-def program_parts(titles: list[set[str]]) -> set[str]:
-    """The title parts a program puts in its titles (its name), from the parts of its saved and open
-    windows' titles: what the titles holding its most frequent part all share (each of them, when odd
-    titles are as frequent). A title without it ("Downloads") is left out, so odd titles never make
-    the name count as a site; a single title gives all of its parts (nothing to tell its site from
-    its name)."""
-    # (each distinct title once: several windows or saved places with the same odd title ("Downloads"
-    # three times) never outnumber the program's name)
-    titles = [set(t) for t in dict.fromkeys(frozenset(t) for t in titles)]
-    counts: dict[str, int] = {}
-    for parts in titles:
-        for p in parts:
-            counts[p] = counts.get(p, 0) + 1
-    if not counts:
-        return set()
-    best = max(counts.values())
-    if best < 2:
-        return set.intersection(*titles)  # (no part repeats: only what every title has, if any)
-    # Each most frequent part (a tie: odd titles as frequent as the name) with what its titles share
-    out: set[str] = set()
-    for top in (p for p, n in counts.items() if n == best):
-        out |= set.intersection(*(parts for parts in titles if top in parts))
-    return out
+def order_of(h: int, win) -> int:
+    """When the window first appeared, as a count (shared by the saved desktops and the last known
+    places): the first window of a program goes back to the place of the first one recorded, etc."""
+    key = (h, win.get_pid(h))
+    o = _order.get(key)
+    if o is None:
+        if len(_order) >= ORDER_MAX:
+            for k in [k for k in _order if not win.is_window(k[0])]:
+                del _order[k]
+        o = _order[key] = _next_order[0]
+        _next_order[0] += 1
+    return o
 
 
-def title_parts(title: str) -> list[str]:
-    """Hashes of the parts of a title, as browsers and editors build them ("Page - Site - Browser",
-    "*notes.txt - Notepad"): lowercase, without unread counters or unsaved-changes marks, so
-    "Inbox (3) - Webmail" and "Inbox (5) - Webmail" share "inbox" and "webmail", and "*notes.txt" is
-    still "notes.txt"."""
-    return list(_title_parts(title))  # a fresh list: entries keep their own
+def number_new(windows, win) -> None:
+    """Windows seen for the first time together, oldest first (reverse z-order): numbered by their
+    process's start (an app started earlier opened its windows earlier), then in that order, so a
+    window first noticed by a record (not by a placement) keeps the order it opened in. Windows has
+    no creation time for a window: among one process's windows open before DisplayDesktop started,
+    z-order is the best guess."""
+    new = [h for h in windows if (h, win.get_pid(h)) not in _order]
+    if len(new) > 1:
+        started: dict[int, int] = {}
+        for h in new:
+            pid = win.get_pid(h)
+            if pid not in started:
+                started[pid] = win.process_started(pid) or 0
+        new.sort(key=lambda h: started[win.get_pid(h)])  # (stable: one process's keep their order)
+    for h in new:
+        order_of(h, win)
 
 
-@functools.lru_cache(maxsize=1024)
-def _title_parts(title: str) -> tuple[str, ...]:
-    parts: list[str] = []
-    for seg in _SEPARATORS.split(title):
-        seg = " ".join(_COUNTERS.sub(" ", seg).lower().split()).strip(_MARKERS)
-        if len(seg) >= 2:
-            h = title_hash(seg)
-            if h not in parts:
-                parts.append(h)
-    return tuple(parts)
+def seed_order(h: int, order: int, win) -> None:
+    """The same window as a recorded one (same boot, same handle and process: DisplayDesktop alone
+    restarted): it keeps that record's number, and windows seen later count after it."""
+    key = (h, win.get_pid(h))
+    if key not in _order and isinstance(order, int) and order > 0:
+        _order[key] = order
+        _next_order[0] = max(_next_order[0], order + 1)
 
 
 def group_setups(entries, row) -> dict:
@@ -325,81 +308,39 @@ class WindowLayout:
 
     # ---- matching
 
-    def _pid_of(self, e: Entry) -> int:
-        """The process that had this entry's window, if known and still meaningful (0 if not)."""
-        return 0
+    def _app_key(self, exe: str, cls: str, title_hash_: str) -> tuple:
+        """What windows are counted by: program and class (Store apps, SHARED_HOSTS: their title too)."""
+        exe = exe.lower()
+        return (exe, cls, title_hash_) if os.path.basename(exe) in SHARED_HOSTS else (exe, cls)
 
-    def assign(self, windows: list[int], level: int = LOOSE) -> list[tuple[int, Entry]]:
-        """Matches newly seen windows to free entries of the same program and class, up to the
-        given level (PROCESS, EXACT, SITE or LOOSE), and binds them. All windows are considered
-        together: the best pairs are taken first, so the order in which windows happened to open
-        does not matter. A pair is better when (in this order) it is the same app instance (same
-        process), the title is the same, more title parts are shared (parts every entry of that
-        program has, like the app name, do not count), the place is on the monitor the window is on
-        now, and it is closer to where the window is now. So identical windows (three "Untitled -
-        Notepad") each get a place of their own: copies are never stacked on one place.
-        Store apps (SHARED_HOSTS) share one process and only ever match their exact title."""
+    def assign(self, windows: list[int]) -> list[tuple[int, Entry]]:
+        """Matches newly seen windows to free entries of the same program and class by count, never
+        by title: the program's first window (in the order they first appeared, order_of) takes the
+        free place recorded first (Order), the second the next, and so on. A window with no place
+        left (more windows than places) is not matched: it stays where Windows opened it. Store apps
+        (SHARED_HOSTS: one program for all of them) are counted per title (the app's name)."""
         w = self._win
+        number_new(reversed(windows), w)  # (first seen together: the one lowest in z-order is the oldest)
         bound = {id(e) for e in self._bound.values()}
-        free = [e for e in self._candidates() if id(e) not in bound]
-        titles: dict[tuple[str, str], list[set[str]]] = {}
-        by_app: dict[tuple[str, str], list] = {}  # (program, class) -> [(entry, its title parts)], in `free` order
-        for e in free:
-            key, eparts = (e.Exe.lower(), e.Class), set(e.TitleParts)
-            titles.setdefault(key, []).append(eparts)
-            by_app.setdefault(key, []).append((e, eparts))
-        # (every part of the saved titles: an open window counts only if it shares one, so repeated
-        # odd open titles ("Downloads" twice) never outnumber the program's name)
-        saved = {key: set().union(*sets) for key, sets in titles.items()}
-        seen = []
+        free: dict[tuple, list[Entry]] = {}
+        for e in self._candidates():
+            if id(e) not in bound:
+                free.setdefault(self._app_key(e.Exe, e.Class, e.TitleHash), []).append(e)
+        for places in free.values():
+            places.sort(key=lambda e: e.Order)  # (stable: equal ones keep the file's order)
+        new: dict[tuple, list[int]] = {}
         for h in windows:
             if h in self._bound:
                 continue
-            exe, cls, title = self._exe_of(h).lower(), w.get_class(h), w.get_title(h)
-            parts = set(title_parts(title))
-            seen.append((h, exe, cls, title, parts))
-            if (exe, cls) in titles and parts & saved.get((exe, cls), set()):
-                titles[(exe, cls)].append(parts)  # (the windows' titles count too, those like a saved one)
-        # The parts the program puts in its titles (its name): never a site
-        common = {key: program_parts(sets) for key, sets in titles.items()}
-        pairs = []
-        names = self._names
-        for h, exe, cls, title, parts in seen:
-            same_app = by_app.get((exe, cls))
-            if not same_app:
-                continue  # (no saved entry of that program and class)
-            shared_host = os.path.basename(exe) in SHARED_HOSTS
-            pid = w.get_pid(h)
-            th = title_hash(title)
-            with w.in_window_dpi_context(h):
-                wp = w.get_placement(h)
-            now = wp.rcNormalPosition.tup() if wp is not None else (0, 0, 0, 0)
-            dev = w.monitor_device_of_window(h)
-            here = names.get(dev, "") if dev else ""
-            name = common[(exe, cls)]
-            for e, eparts in same_app:
-                exact = e.TitleHash == th
-                if shared_host and not exact:
-                    continue
-                same_process = not shared_host and bool(pid) and self._pid_of(e) == pid
-                shared = len((parts & eparts) - name)
-                kind = PROCESS if same_process else EXACT if exact else SITE if shared else LOOSE
-                if kind > level:
-                    continue
-                score = (same_process, exact, shared, bool(here) and e.Display == here,
-                         -(abs(e.Left - now[0]) + abs(e.Top - now[1])))
-                pairs.append((score, h, e))
-        pairs.sort(key=lambda p: p[0], reverse=True)  # stable: ties keep window/entry order
-        taken_h: set[int] = set()
-        taken_e: set[int] = set()
+            key = self._app_key(self._exe_of(h), w.get_class(h), title_hash(w.get_title(h)))
+            if key in free:
+                new.setdefault(key, []).append(h)
         result = []
-        for _, h, e in pairs:
-            if h in taken_h or id(e) in taken_e:
-                continue
-            taken_h.add(h)
-            taken_e.add(id(e))
-            self._bound[h] = e
-            result.append((h, e))
+        for key, hs in new.items():
+            hs.sort(key=lambda h: order_of(h, w))
+            for h, e in zip(hs, free[key]):
+                self._bound[h] = e
+                result.append((h, e))
         return result
 
     def _candidates(self) -> list[Entry]:
@@ -418,9 +359,9 @@ class WindowLayout:
         r = wp.rcNormalPosition
         title = w.get_title(p.window)
         return Entry(Exe=self._exe_of(p.window), Class=w.get_class(p.window),
-                     TitleHash=title_hash(title), TitleParts=title_parts(title), Display=p.display, Setup=self._setup,
+                     TitleHash=title_hash(title), Display=p.display, Setup=self._setup,
                      Desktop=p.desktop, WorkLeft=work[0], WorkTop=work[1], ShowCmd=wp.showCmd,
-                     Left=r.left, Top=r.top, Right=r.right, Bottom=r.bottom)
+                     Left=r.left, Top=r.top, Right=r.right, Bottom=r.bottom, Order=order_of(p.window, w))
 
     # ---- saving (manual only)
 

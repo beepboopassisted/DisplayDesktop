@@ -55,6 +55,7 @@ DisplayDesktop starts in the system tray (two blue screens icon). You can also d
     - **Start With Windows** - Starts at sign-in.
     - **Add To Start Menu** - Adds DisplayDesktop to the Start menu.
     - **Use GPU Acceleration** - Runs the desktop slide on the graphics card each monitor is connected to.
+    - **Restore Applications On Restart** - After Windows restarts, apps that were open start again and their windows go back where they were.
     - **Show Advanced** - Shows these options:
         - **Settings Folder** - Where settings are saved. **Apply** moves them there; **Default** moves them back. If both folders have settings, you pick which to keep.
         - **Encrypt Settings** - Type a key and **Apply** to encrypt every settings file. Unchecking decrypts them.
@@ -62,6 +63,10 @@ DisplayDesktop starts in the system tray (two blue screens icon). You can also d
         - **Show Console** - Shows a log of what DisplayDesktop does.
         - **Recovery** - Shows what is wrong with each settings file. Restore hidden windows, clear desktops (one desktop per monitor; deletes the save), recreate the settings files, or quit.
 - **Exit** - Quits. Everything comes back at the next start.
+
+## Encryption (Optional)
+
+When **Encrypt Settings** is on, every settings file is encrypted with AES-256-GCM, and your key is stretched with PBKDF2-HMAC-SHA256.
 
 ## Known limitations
 
