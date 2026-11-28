@@ -177,6 +177,7 @@ class DesktopManager:
         self._hidden: dict[int, None] = {}
         self._hidden_at: dict[int, float] = {}  # window -> perf_counter when we last hid it
         self._used_at: dict[int, float] = {}  # window -> time.monotonic() it was last seen in the foreground
+        self.previews = True  # window previews are taken (off: Disable Overview previews; see set_previews)
         self._persisted: set[int] = set()
         self._stale_journals: list[str] = []  # ours in folders moved away from (_drop_stale_journal)
         # ours in the default folder while the folder in use is offline (_write_fallback): only for the
@@ -1069,22 +1070,39 @@ class DesktopManager:
     def _collect_previews(self) -> None:
         """Installs the background previews finished so far, except those of windows we hid after
         their capture began (half drawn)."""
+        if not self.previews:  # (one taken while they were turned off: dropped)
+            self.snapshots.collect(lambda h, started: False)
+            return
         hidden, hidden_at, is_window = self._hidden, self._hidden_at, self._win.is_window
         self.snapshots.collect(lambda h, started: is_window(h) and h not in hidden
                                and hidden_at.get(h, -1.0) < started)
 
+    def set_previews(self, on: bool) -> None:
+        """Disable Overview previews (off): no window is captured any more (none in the background,
+        none in a switch) and the previews taken are freed at once; the Overview shows hidden windows
+        as icons (visible ones keep their live thumbnails). On: they are taken again."""
+        on = bool(on)
+        if on == self.previews:
+            return
+        self.previews = on
+        if not on:
+            self.snapshots.clear()  # (the worker's list emptied: it goes idle)
+            self._used_at.clear()
+
     def _refresh_previews(self, is_window) -> None:
         """Keeps the previews of the shown desktops' windows current in the background, so a switch
         never waits on a capture: a window without one, one in use since its preview (at most every
-        PREVIEW_FRESH_S), and any preview older than PREVIEW_MAX_AGE_S."""
+        PREVIEW_FRESH_S), and any preview older than PREVIEW_MAX_AGE_S. Nothing while they are off."""
         self._collect_previews()
+        for d in (self._used_at, self._hidden_at):
+            for h in [h for h in d if not is_window(h)]:
+                del d[h]
+        if not self.previews:
+            return
         now = time.monotonic()
         fg = self._win.get_foreground()
         if fg:
             self._used_at[fg] = now
-        for d in (self._used_at, self._hidden_at):
-            for h in [h for h in d if not is_window(h)]:
-                del d[h]
         shots, wanted = self.snapshots, []
         for st in self._monitors.values():
             for h in st.desktops[st.current]:
@@ -1112,7 +1130,7 @@ class DesktopManager:
             self._journal_in(ctx, {h, *ctx.floating.get(h, ())})
         # Last chance to capture a preview for the overview: hidden windows can't be captured. Only a
         # window without one waits here; the others' were taken in the background (_refresh_previews)
-        if ctx.elapsed_ms() < CAPTURE_BUDGET_MS and self.snapshots.get(h) is None \
+        if self.previews and ctx.elapsed_ms() < CAPTURE_BUDGET_MS and self.snapshots.get(h) is None \
                 and not self.snapshots.failed_recently(h, PREVIEW_RETRY_S):
             self.snapshots.capture(h)
         if not w.show_window(h, N.SW_HIDE):
@@ -1432,10 +1450,24 @@ class DesktopManager:
 
         # (visibility read again here: the restore above may have hidden windows)
         device_of, monitors = w.monitor_device_of_window, self._monitors
+        # A window already on its monitor's current desktop stays as it is whether it is eligible or
+        # not: only its monitor is asked (no eligibility reads for the windows in view; no map built).
+        # The current sets are bound once per sync (filled in place below: the same dicts)
+        shown = tuple((st.desktops[st.current], st) for st in monitors.values())
         for h in filter(vis, top_level):  # (filter: the visibility test per window without a bytecode loop)
-            if not eligible(h):
+            for cur, st in shown:
+                if h in cur:
+                    break
+            else:
+                st = None
+            if st is not None:
+                dev = device_of(h)
+                if dev == st.device or not eligible(h):
+                    continue
+            elif not eligible(h):
                 continue
-            dev = device_of(h)
+            else:
+                dev = device_of(h)
             st = monitors.get(dev) if dev is not None else None
             if st is None:
                 continue

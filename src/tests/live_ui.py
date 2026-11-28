@@ -631,6 +631,32 @@ def main() -> int:
         mgr.switch_to(dev, 0)
         pump_until(lambda: anim.active_count == 0, 2)
         check(mgr.snapshots.get(three) is not None, "snapshot of the hidden window exists for the overview")
+
+        # Disable Overview previews: freed at once, nothing captured (background or switch); on again: back
+        mgr.set_previews(False)
+        check(mgr.snapshots.get(three) is None and not mgr.snapshots._shots, "previews off: every preview freed")
+        spied = []
+        real_take, real_refresh = mgr.snapshots.take, mgr.snapshots.refresh
+        mgr.snapshots.take = lambda h: spied.append(("take", h)) or real_take(h)
+        mgr.snapshots.refresh = lambda hs: spied.append(("refresh", list(hs))) or real_refresh(hs)
+        try:
+            for target in (1, 0):
+                mgr.switch_to(dev, target)
+                pump_until(lambda: anim.active_count == 0, 2)
+                for _ in range(3):
+                    mgr.sync()
+                    pump(100)
+        finally:
+            mgr.snapshots.take, mgr.snapshots.refresh = real_take, real_refresh
+        check(not spied and not mgr.snapshots._shots and mgr.snapshots.get(three) is None,
+              f"previews off: no capture in switches nor syncs ({spied[:4]}), the Overview shows icons")
+        mgr.set_previews(True)
+        mgr.switch_to(dev, 1)
+        pump_until(lambda: anim.active_count == 0, 2)
+        pump_until(lambda: mgr.sync() or mgr.snapshots.get(three) is not None, 3)
+        mgr.switch_to(dev, 0)
+        pump_until(lambda: anim.active_count == 0, 2)
+        check(mgr.snapshots.get(three) is not None, "previews on again: taken as before")
         for h in (one, two, three):
             G.SetWindowPos(h, N.HWND_NOTOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
 
@@ -1132,11 +1158,43 @@ def main() -> int:
             G.SendMessageW(ctl[SW.ID_GPU], BM_CLICK, 0, None)
             pump(50)
             check(calls[-1:] == [("gpu", True)] and dlg.checked(SW.ID_GPU), "and back on")
-            rows = [N.get_window_rect(ctl[c]) for c in (SW.ID_STARTUP, SW.ID_START_MENU, SW.ID_GPU, SW.ID_RESTORE_APPS)]
+            rows = [N.get_window_rect(ctl[c]) for c in (SW.ID_STARTUP, SW.ID_START_MENU, SW.ID_RESTORE_APPS, SW.ID_GPU,
+                                                        SW.ID_NO_PREVIEWS)]
             check(N.get_title(ctl[SW.ID_RESTORE_APPS]) == "Restore Applications On Restart"
+                  and N.get_title(ctl[SW.ID_NO_PREVIEWS]) == "Disable Overview Previews (Less Compute)"
                   and all(r[0] == rows[0][0] for r in rows) and all(a[3] <= b[1] for a, b in zip(rows, rows[1:]))
                   and rows[-1][3] <= N.get_window_rect(ctl[SW.ID_ADVANCED])[1],
-                  f"Restore Applications On Restart: the 4th option row, under Use GPU Acceleration ({rows})")
+                  f"option rows: ..., Add To Start Menu, Restore Applications On Restart, Use GPU Acceleration, "
+                  f"Disable Overview Previews (Less Compute) ({rows})")
+            next_in_z = N._f(N.user32, "GetWindow", N.H, N.H, ctypes.c_uint)  # GW_HWNDNEXT 2: the tab order
+            wanted = (SW.ID_STARTUP, SW.ID_START_MENU, SW.ID_RESTORE_APPS, SW.ID_GPU, SW.ID_NO_PREVIEWS, SW.ID_ADVANCED)
+            by_hwnd = {ctl[c]: c for c in wanted}
+            tab, h = [], ctl[SW.ID_STARTUP]
+            while h and len(tab) < len(wanted):
+                if h in by_hwnd:
+                    tab.append(by_hwnd[h])
+                h = next_in_z(h, 2)
+            check(tuple(tab) == wanted, f"tab order follows the rows, then Show Advanced ({tab})")
+            np = ctl[SW.ID_NO_PREVIEWS]
+            np_rc = N.get_window_rect(np)
+            ideal = SW._SIZE()
+            G.SendMessageW(np, 0x1601, 0, ctypes.addressof(ideal))  # BCM_GETIDEALSIZE: box + text on one line
+            check(all(r[3] - r[1] == rows[0][3] - rows[0][1] for r in rows)
+                  and len({b[1] - a[1] for a, b in zip(rows, rows[1:])}) == 1
+                  and 0 < ideal.cx <= np_rc[2] - np_rc[0],
+                  f"Disable Overview previews: one row like the others, its label fits "
+                  f"(ideal {ideal.cx} px, row {np_rc}, one row {rows[0]})")
+            dlg._on_previews = lambda on: calls.append(("previews", on))
+            check(dlg.checked(SW.ID_NO_PREVIEWS), "Disable Overview previews shows its setting (on)")
+            set_setting.reset_mock()
+            G.SendMessageW(np, BM_CLICK, 0, None)
+            pump(50)
+            check(not dlg.checked(SW.ID_NO_PREVIEWS) and set_setting.call_args_list == [mock.call("NoPreviews", False)]
+                  and calls[-1:] == [("previews", True)], "click Disable Overview previews: off, previews on at once")
+            G.SendMessageW(np, BM_CLICK, 0, None)
+            pump(50)
+            check(dlg.checked(SW.ID_NO_PREVIEWS) and set_setting.call_args_list[-1] == mock.call("NoPreviews", True)
+                  and calls[-1:] == [("previews", False)], "and back on: previews off at once")
             check(dlg.checked(SW.ID_RESTORE_APPS), "Restore Applications On Restart shows its setting (on)")
             set_setting.reset_mock()
             G.SendMessageW(ctl[SW.ID_RESTORE_APPS], BM_CLICK, 0, None)

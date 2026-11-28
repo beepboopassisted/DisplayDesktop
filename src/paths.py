@@ -136,7 +136,7 @@ def forget_failures(folder: str | None = None) -> None:
 # ours, a bad format), or of a NEWER format (a hacked file, or an older version installed again, e.g.
 # from a backup or on a new computer). The user is asked (tray: Quit, or delete the files and start
 # them fresh; never converted back or repaired); until answered it reads as damaged (ValueError).
-FORMAT = 5
+FORMAT = 6
 FORMAT_KEY = "Format"
 
 
@@ -172,7 +172,13 @@ def _from_4(name: str, data: dict) -> dict:
     return data
 
 
-MIGRATIONS: dict[int, object] = {1: _from_1, 2: _from_2, 3: _from_3, 4: _from_4}  # format n -> fn(file name, data) returning that file's data in format n + 1
+def _from_5(name: str, data: dict) -> dict:
+    """Format 6: settings.json may carry "NoPreviews" (Disable Overview previews). Older files have
+    none: previews stay on."""
+    return data
+
+
+MIGRATIONS: dict[int, object] = {1: _from_1, 2: _from_2, 3: _from_3, 4: _from_4, 5: _from_5}  # format n -> fn(file name, data) returning that file's data in format n + 1
 on_unreadable = None  # called with a data file's path when it can't be read at all (tray: the question);
 # returns whether that question covers the file (the error then carries `asked = True`)
 kept: set[str] = set()  # normcased paths waiting for the Quit / Recreate Files answer: never written over

@@ -25,6 +25,14 @@ class ConsoleTests(unittest.TestCase):
         console._history.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def test_viewer_uses_the_app_s_launch_flags(self):
+        from src import startup
+        with mock.patch.object(startup, "FLAGS", ("-I", "-X", "frozen_modules=off")), \
+                mock.patch.object(console, "_python_exe", return_value=r"C:\Py\python.exe"), \
+                mock.patch("subprocess.Popen") as popen:
+            console._Viewer().close(True)
+        self.assertEqual(popen.call_args[0][0][:5], [r"C:\Py\python.exe", "-I", "-X", "frozen_modules=off", "-c"])
+
     def test_setting_round_trip(self):
         self.assertFalse(console.load_enabled())
         console.save_enabled(True)

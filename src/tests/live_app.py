@@ -195,6 +195,14 @@ def main() -> int:
     except OSError:
         pass
 
+    def startup_lnk():
+        try:
+            st = os.stat(startup.path())
+            return st.st_size, st.st_mtime_ns
+        except OSError:
+            return None
+    lnk_before = startup_lnk()
+
     helper = Helper(tmp, "app", scr.work, ["WS App One", "WS App Two"])
     wins = list(helper.windows.values())
     apps: list[App] = []
@@ -289,7 +297,8 @@ def main() -> int:
                 now = winreg.QueryValueEx(k, startup.VALUE_NAME)[0]
         except OSError:
             now = None
-        check(now == reg_before, "a test-mode copy never touches the startup entry")
+        check(now == reg_before and startup_lnk() == lnk_before,
+              "a test-mode copy never touches the startup entry (Run value, Startup shortcut)")
         app.post(G.RegisterWindowMessageW("TaskbarCreated"))
         time.sleep(0.3)
         check(app.proc.poll() is None, "survives an Explorer restart notification")

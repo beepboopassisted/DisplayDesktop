@@ -275,11 +275,15 @@ class Setting(unittest.TestCase):
         self.assertFalse(self.settings.get("RestoreApps"))
         self.assertIn("Restore Applications On Restart: off.", log.call_args.args[0])
 
-    def test_the_checkbox_is_the_fourth_option_row(self):
+    def test_the_checkbox_is_the_third_option_row(self):
         from src import settings_window as SW
         from src import strings as L
-        self.assertEqual(SW.OPTION_ROWS, 4)
+        self.assertEqual(SW.OPTION_ROWS, 5)
         self.assertEqual(L.t("settings.restoreApps"), "Restore Applications On Restart")
+        import inspect
+        src = inspect.getsource(SW.SettingsWindow.__init__)
+        at = [src.index(f'"{k}"') for k in ("settings.startMenu", "settings.restoreApps", "settings.gpu")]
+        self.assertEqual(at, sorted(at), "right under Add To Start Menu, above Use GPU Acceleration")
 
     def test_a_folder_move_applies_it_to_the_manager(self):
         from src import tray as T

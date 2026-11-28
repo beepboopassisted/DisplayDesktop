@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 
-from . import settings
+from . import settings, startup
 from .paths import is_test_mode
 
 HISTORY_LINES = 500
@@ -151,14 +151,12 @@ def capture_output() -> None:
 
 def _python_exe() -> str | None:
     """python.exe (console) of the Python running now; else the first python.exe in a PATH folder that
-    runs a Python (a WindowsApps alias is tried: a Store Python's works, the install stub doesn't)."""
+    runs a Python (startup.on_path_all's folders: a drive or UNC root; a WindowsApps alias is tried: a
+    Store Python's works, the install stub doesn't)."""
     own = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "python.exe")
     if os.path.isfile(own):
         return own
-    for d in (os.environ.get("PATH") or "").split(os.pathsep):
-        found = os.path.join(d, "python.exe") if d and os.path.isabs(d) else ""
-        if not found or not os.path.isfile(found):
-            continue
+    for found in startup.on_path_all("python.exe"):
         if "\\windowsapps\\" not in os.path.normcase(found) or _alias_runs(found):
             return found
     return None
@@ -193,7 +191,7 @@ class _Viewer:
             raise OSError("python.exe not found")
         # Test runs must never pop a window: the viewer then has a console without one
         test = is_test_mode()
-        self.proc = subprocess.Popen([exe, "-I", "-B", "-c", VIEWER_CODE, TITLE, "nowait" if test else "wait"],
+        self.proc = subprocess.Popen([exe, *startup.FLAGS, "-c", VIEWER_CODE, TITLE, "nowait" if test else "wait"],
                                      stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL, close_fds=True,
                                      creationflags=CREATE_NO_WINDOW if test else CREATE_NEW_CONSOLE)

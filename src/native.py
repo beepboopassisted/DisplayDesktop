@@ -42,6 +42,28 @@ shell32 = _load("shell32.dll")
 gdiplus = _load("gdiplus.dll")
 comctl32 = _load("comctl32.dll")
 
+
+def preload(*names: str) -> None:
+    """Loads System32 DLLs on a thread while the caller goes on (LoadLibrary runs without the GIL),
+    so a later _load(name) finds them in memory. Never raises: a DLL that fails here fails in _load
+    as before. (Same flags as ctypes: LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | _DLL_LOAD_DIR.)"""
+    try:
+        import _thread
+        load = _f(kernel32, "LoadLibraryExW", c_ssize_t, c_wchar_p, c_ssize_t, c_ulong)
+        paths = [os.path.join(_SYS32, n) for n in names]
+
+        def run() -> None:
+            try:
+                for p in paths:
+                    load(p, 0, 0x1100)
+            except Exception:  # noqa: BLE001
+                pass
+
+        _thread.start_new_thread(run, ())
+    except Exception:  # noqa: BLE001
+        pass
+
+
 H = c_ssize_t          # any handle (HWND, HMONITOR, HDC, HICON, HBITMAP, HANDLE, ...)
 LRESULT = c_ssize_t
 WPARAM = c_size_t
@@ -700,7 +722,8 @@ DRIVE_FIXED = 3
 
 
 def is_fixed_drive(root: str) -> bool:
-    """A local fixed disk (C:\\ ...): never "offline", however slowly it answers."""
+    """A local fixed disk (C:\\ ...): never "offline", however slowly it answers (any other drive, a
+    network one above all, may wait for a timeout)."""
     return _GetDriveTypeW(root) == DRIVE_FIXED
 
 

@@ -106,6 +106,56 @@ class Adoption(Base):
         self.assertEqual(m.desktops_of(D1), [[]])
         self.assertEqual(m.desktops_of(D2), [[a]])
 
+    def test_a_window_in_view_on_the_same_monitor_gets_no_eligibility_reads(self):
+        """Hot path: a window already on its monitor's current desktop is only asked for its monitor;
+        an unmanaged one and one that changed monitors are read for eligibility."""
+        w = self.win
+        a = w.add("A", 0)
+        b = w.add("B", 1)
+        tool = w.add("Tool", exstyle=N.WS_EX_TOOLWINDOW)
+        m = self.manager()
+        m.sync()
+        m.sync()
+        reads, devices = [], []
+        exstyle, device_of = w.get_exstyle, w.monitor_device_of_window
+        with mock.patch.object(w, "get_exstyle", side_effect=lambda h: reads.append(h) or exstyle(h)), \
+                mock.patch.object(w, "monitor_device_of_window", side_effect=lambda h: devices.append(h) or device_of(h)):
+            for _ in range(3):
+                m.sync()
+            self.assertEqual((reads.count(a), reads.count(b)), (0, 0), "no eligibility reads in view")
+            self.assertEqual((devices.count(a), devices.count(b)), (3, 3), "its monitor, once per sync")
+            self.assertGreaterEqual(reads.count(tool), 3, "an unmanaged window: read each sync")
+            reads.clear()
+            w.windows[a].rect = (2000, 100, 2800, 700)
+            m.sync()
+            self.assertEqual(reads.count(a), 1, "moved to another monitor: read once")
+        self.assertEqual(m.desktops_of(D1), [[]])
+        self.assertEqual(m.desktops_of(D2), [[b, a]])
+
+    def test_the_adoption_loop_indexes_the_desktops_once_per_sync(self):
+        """Hot path: each monitor's current desktop is looked up once per sync, not per window in view."""
+        class Counting(list):
+            gets = 0
+
+            def __getitem__(self, i):
+                Counting.gets += 1
+                return list.__getitem__(self, i)
+
+        counts = []
+        for n in (2, 8):
+            self.win = FakeWin()
+            for i in range(n):
+                self.win.add(f"W{i}", i % 2)
+            m = self.manager()
+            m.sync()
+            m.sync()
+            for st in m._monitors.values():
+                st.desktops = Counting(st.desktops)
+            Counting.gets = 0
+            m.sync()
+            counts.append(Counting.gets)
+        self.assertEqual(counts[0], counts[1], "lookups per sync with 2 and 8 windows in view")
+
     def test_closed_window_dropped(self):
         a = self.win.add("A")
         m = self.manager()
@@ -2376,6 +2426,71 @@ class BackgroundPreviews(Base):
         self.shots.collect = lambda keep: kept.extend(h for h in (a, b) if keep(h, started))
         m._collect_previews()
         self.assertEqual(kept, [a])
+
+
+class PreviewsOff(Base):
+    """Disable Overview previews: no capture at all while off (background, switch), previews freed at
+    once; on again, taken as before."""
+
+    def test_off_nothing_is_captured_and_the_previews_are_freed(self):
+        a, b = self.win.add("A"), self.win.add("B")
+        m = self.manager()
+        m.sync()
+        self.assertTrue(self.shots.refreshed[-1], "on: previews asked for")
+        m.set_previews(False)
+        self.assertEqual(self.shots.cleared, 1, "the previews taken are freed at once")
+        m.set_previews(False)
+        self.assertEqual(self.shots.cleared, 1, "(already off: nothing again)")
+        self.shots.refreshed.clear()
+        self.shots.take = self.shots.refresh = mock.Mock(side_effect=AssertionError("no capture while off"))
+        kept = []
+        self.shots.collect = lambda keep: kept.append(keep(a, time.perf_counter()))
+        for _ in range(3):
+            self.win.set_foreground(a)
+            m.sync()
+        self.new_desktop(m)  # A and B hidden: a switch, no capture
+        m.switch_to(D1, 0)
+        m.sync()
+        self.shots.refresh.assert_not_called()
+        self.assertEqual(self.shots.captured, [], "no capture in a switch")
+        self.assertTrue(kept and not any(kept), "a capture under way when turned off is dropped")
+        self.assertEqual(m._used_at, {})
+
+    def test_on_again_previews_resume(self):
+        a = self.win.add("A")
+        m = self.manager()
+        m.set_previews(False)
+        m.sync()
+        self.assertEqual(self.shots.refreshed, [])
+        m.set_previews(True)
+        m.sync()
+        self.assertEqual(self.shots.refreshed[-1], [a], "background previews again")
+        self.new_desktop(m)
+        self.assertEqual(self.shots.captured, [a], "a switch captures again")
+
+
+class OverviewIcons(unittest.TestCase):
+    """With previews off the store is empty: the Overview draws a hidden window's icon in its tile."""
+
+    def test_a_hidden_window_without_a_preview_shows_its_icon(self):
+        from src import overview as O
+        from src import snapshots as SN
+        store = SN.WindowSnapshots()
+        with mock.patch.object(SN.G, "DeleteObject") as freed:
+            store._store(7, SN.Shot(55, 10, 10, time.monotonic()))
+            m = DesktopManager.__new__(DesktopManager)
+            m.snapshots, m.previews, m._used_at = store, True, {}
+            m.set_previews(False)
+            self.assertIsNone(store.get(7), "freed")
+            freed.assert_called_with(55)
+        view = SimpleNamespace(s=lambda v: int(v), _mgr=m, _icon=lambda h: 99, font=lambda pt: 0)
+        tile = SimpleNamespace(rect=(0, 0, 200, 150), preview=(4, 4, 192, 120), thumb=0,
+                               win=SimpleNamespace(handle=7, title="A"))
+        with mock.patch.object(O.G, "DrawIconEx") as icon, mock.patch.object(O.G, "StretchBlt") as blt, \
+                mock.patch.object(O.G, "draw_text"):
+            O.Overview._paint_tile_content(view, 1, tile, 0)
+        blt.assert_not_called()
+        self.assertEqual(icon.call_args_list[0].args[4:6], (32, 32), "the big icon in the preview's place")
 
 
 class SnapshotWorker(unittest.TestCase):

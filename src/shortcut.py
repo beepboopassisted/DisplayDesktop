@@ -12,6 +12,10 @@ a fixed AppUserModelID, and the shell is told about the change (SHChangeNotify).
 Start menu generates a new one for every new shortcut and keeps the old entry cached.
 Nothing is hard-coded: the Start menu folder comes from Windows, the rest from this file's location.
 A copy in test mode (DISPLAYDESKTOP_DATA set) never creates or deletes it.
+
+The same functions write the Startup-folder shortcut of Start With Windows (startup.py passes its own
+`lnk` path and target). settings is imported where it is used: `run status` reads the Startup
+shortcut and must not load paths.
 """
 from __future__ import annotations
 
@@ -21,13 +25,14 @@ import sys
 from ctypes import POINTER, WINFUNCTYPE, Structure, byref, c_long, c_ubyte, c_ulong, c_ushort, c_void_p
 
 from . import native as N
-from . import settings, startup
+from . import startup
 
 NAME = "DisplayDesktop"
 APP_ID = "DisplayDesktop.App"
 DESCRIPTION = "Give every screen its own workspaces"
 ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.ico")
 CSIDL_PROGRAMS = 0x0002
+CSIDL_STARTUP = 0x0007
 
 _SHGetFolderPathW = N._f(N.shell32, "SHGetFolderPathW", c_long, N.H, ctypes.c_int, N.H, N.DWORD,
                          ctypes.c_wchar_p)
@@ -204,21 +209,28 @@ def read_link(lnk: str) -> dict[str, str]:
 # ---------------------------------------------------------------- shortcut
 
 
-def programs_dir() -> str:
-    """The current user's Start menu "Programs" folder (wherever it is redirected to)."""
+def folder(csidl: int) -> str:
+    """A shell folder of the current user (wherever it is redirected to): CSIDL_PROGRAMS (Start menu
+    "Programs"), CSIDL_STARTUP. OSError if Windows has none."""
     buf = ctypes.create_unicode_buffer(520)
-    if _SHGetFolderPathW(0, CSIDL_PROGRAMS, 0, 0, buf) != 0 or not buf.value:
-        raise OSError("Start menu folder not found")
+    if _SHGetFolderPathW(0, csidl, 0, 0, buf) != 0 or not buf.value:
+        raise OSError("shell folder not found")
     return buf.value
+
+
+def programs_dir() -> str:
+    """The current user's Start menu "Programs" folder."""
+    return folder(CSIDL_PROGRAMS)
 
 
 def path() -> str:
     return os.path.join(programs_dir(), NAME + ".lnk")
 
 
-def exists() -> bool:
+def exists(lnk: str | None = None) -> bool:
+    """The shortcut `lnk` (None: the Start menu one) is there."""
     try:
-        return os.path.isfile(path())
+        return os.path.isfile(path() if lnk is None else lnk)
     except OSError:
         return False
 
@@ -231,23 +243,20 @@ def target() -> tuple[str, str]:
     here = os.path.dirname(os.path.abspath(sys.executable))
     exe = os.path.join(here, "pythonw.exe")
     if os.path.isfile(exe):
-        return exe, f'-B "{startup.LAUNCHER}"'
+        return exe, startup.launcher_args()
     if os.path.basename(sys.executable).lower() == "pythonw.exe":
-        return os.path.abspath(sys.executable), f'-B "{startup.LAUNCHER}"'
+        return os.path.abspath(sys.executable), startup.launcher_args()
     launcher = _launcher()
     if launcher:
-        return launcher, f'-3 -B "{startup.LAUNCHER}"'
+        return launcher, f"-3 {startup.launcher_args()}"
     raise OSError("no pythonw.exe for this Python")
 
 
 def _launcher() -> str | None:
-    """pyw.exe in a PATH folder (never the current one), full path."""
-    for d in (os.environ.get("PATH") or "").split(os.pathsep):
-        if d and os.path.isabs(d):
-            p = os.path.join(d, "pyw.exe")
-            if os.path.isfile(p):
-                return os.path.abspath(p)
-    return None
+    """pyw.exe (that name, whatever PATHEXT says) in a PATH folder with a drive or UNC root (never the
+    current one nor a drive-relative one), full path (written as is: which PATH finds it does not matter)."""
+    p = startup.on_path("pyw.exe")
+    return os.path.abspath(p) if p else None
 
 
 def _notify(event: int, lnk: str) -> None:
@@ -256,66 +265,71 @@ def _notify(event: int, lnk: str) -> None:
     _SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW | SHCNF_FLUSH, os.path.dirname(lnk), None)
 
 
-def create() -> bool:
+def create(want: tuple[str, str] | None = None, lnk: str | None = None) -> bool:
+    """Writes the shortcut `lnk` (None: the Start menu one). `want`: (target, arguments), target()
+    when None (it may search PATH)."""
     if not startup.can_manage():
         return False
     try:
-        lnk = path()
+        lnk = path() if lnk is None else lnk
         existed = os.path.isfile(lnk)
-        tgt, args = target()
+        tgt, args = target() if want is None else want
         write_link(lnk, tgt, args, startup.REPO_DIR, ICON, DESCRIPTION, APP_ID)
     except OSError:
         return False
     _notify(SHCNE_UPDATEITEM if existed else SHCNE_CREATE, lnk)
-    return exists()
+    return exists(lnk)
 
 
 def _same_path(a: str, b: str) -> bool:
     return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
 
 
-def is_current() -> bool:
-    """True if the shortcut exists and opens this copy the way create() would write it (target,
-    arguments, folder, icon, AppUserModelID). An unreadable one counts as outdated."""
+def is_current(want: tuple[str, str] | None = None, lnk: str | None = None) -> bool:
+    """True if the shortcut `lnk` (None: the Start menu one) exists and opens this copy the way
+    create() would write it (target, arguments, folder, icon, AppUserModelID; paths in any letter
+    case). An unreadable one counts as outdated. `want`: as for create()."""
     try:
-        got = read_link(path())
-        exe, args = target()
+        got = read_link(path() if lnk is None else lnk)
+        exe, args = target() if want is None else want
     except OSError:
         return False
-    return (_same_path(got["exe"], exe) and got["args"] == args
+    return (_same_path(got["exe"], exe) and startup.same_command(got["args"], args)
             and _same_path(got["work_dir"], startup.REPO_DIR) and _same_path(got["icon"], ICON)
             and got["app_id"] == APP_ID)
 
 
-def remove() -> bool:
-    """Deletes the shortcut. Returns True if none is left."""
+def remove(lnk: str | None = None) -> bool:
+    """Deletes the shortcut `lnk` (None: the Start menu one). Returns True if none is left."""
     if not startup.can_manage():
-        return not exists()
+        return not exists(lnk)
     try:
-        lnk = path()
+        lnk = path() if lnk is None else lnk
         os.remove(lnk)
     except FileNotFoundError:
         return True
     except OSError:
         return False
     _notify(SHCNE_DELETE, lnk)
-    return not exists()
+    return not exists(lnk)
 
 
 def set_enabled(enabled: bool) -> bool:
     """The "Add To Start Menu" setting: remembers the choice, then adds (or rewrites) or removes
     the shortcut. Returns whether a shortcut exists now. Never raises."""
+    from . import settings
     if not startup.can_manage():
         return exists()
+    want = None
     if enabled:
         try:
-            target()
+            want = target()  # (once: it may search PATH)
         except OSError:
             return exists()  # (no windowless Python to start: never turned on; one already on is left as it is)
     settings.set("StartMenu", enabled)
     try:
         if enabled:
-            return is_current() or create()
+            return is_current(want) or create(want)
         remove()
     except Exception:  # noqa: BLE001
         pass
@@ -327,12 +341,14 @@ def ensure() -> str:
     it is outdated (folder moved, other Python). Never raises. Returns "added", "updated" or ""
     (nothing done, setting off, or it failed)."""
     try:
+        from . import settings
         if not startup.can_manage() or not settings.get("StartMenu"):
             return ""
+        want = target()  # (once: it may search PATH; none: nothing to write)
         if not exists():
-            return "added" if create() else ""
-        if not is_current():
-            return "updated" if create() else ""
+            return "added" if create(want) else ""
+        if not is_current(want):
+            return "updated" if create(want) else ""
     except Exception:  # noqa: BLE001 - a Start menu entry must never stop the app
         pass
     return ""

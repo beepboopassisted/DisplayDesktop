@@ -20,6 +20,7 @@ DEFAULTS: dict[str, bool | str] = {
     "StartMenu": False,    # Add To Start Menu: the entry is added (and kept current) at start
     "UseGpu": True,        # Use GPU Acceleration: each monitor's slide runs on the GPU that drives it
     "RestoreApps": False,   # Restore Applications On Restart: after a Windows restart, apps that were open start again
+    "NoPreviews": False,    # Disable Overview previews: no window captures; hidden windows show as icons
     "ShowAdvanced": False,  # Settings shows its Advanced options
 }
 _known: dict[str, bool | str] | None = None  # the stored values last read or written (None: not yet)

@@ -1,4 +1,4 @@
-# DisplayDesktop
+# DisplayDesktop 1.0.3
 
 **Give every screen its own desktops.** Per-monitor virtual desktops for Windows: flip through virtual desktops on the monitor you're working on while your other screens keep showing exactly what they were. Made for multi-monitor setups.
 
@@ -8,7 +8,7 @@
 
 ## Features
 
-**No installer, just [download](../../archive/refs/heads/main.zip) and `run`. No dependencies except Python.**
+**No installer, just [download](../../releases/download/1.0.3/DisplayDesktop-1.0.3.zip) and `run`. No dependencies except Python.**
 
 - **Per-Screen Desktops** - Each monitor has its own desktops. Switching changes only the screen under your mouse.
 - **Desktops On Demand** - The Overview shows every desktop on every monitor, with previews. Add and delete desktops in the Overview. Drag windows or desktops to rearrange them.
@@ -54,8 +54,9 @@ DisplayDesktop starts in the system tray (two blue screens icon). You can also d
 - **Settings**
     - **Start With Windows** - Starts at sign-in.
     - **Add To Start Menu** - Adds DisplayDesktop to the Start menu.
-    - **Use GPU Acceleration** - Runs the desktop slide on the graphics card each monitor is connected to.
     - **Restore Applications On Restart** - After Windows restarts, apps that were open start again and their windows go back where they were.
+    - **Use GPU Acceleration** - Runs the desktop slide on the graphics card each monitor is connected to.
+    - **Disable Overview Previews (Less Compute)** - The Overview shows app icons for windows on other desktops instead of pictures.
     - **Show Advanced** - Shows these options:
         - **Settings Folder** - Where settings are saved. **Apply** moves them there; **Default** moves them back. If both folders have settings, you pick which to keep.
         - **Encrypt Settings** - Type a key and **Apply** to encrypt every settings file. Unchecking decrypts them.
@@ -77,7 +78,7 @@ When **Encrypt Settings** is on, every settings file is encrypted with AES-256-G
 
 ## License
 
-[MIT](LICENSE). Based on IndepenDesk by harungecit.
+[MIT](LICENSE)
 
 ## Fork
 

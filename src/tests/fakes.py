@@ -414,6 +414,7 @@ class FakeSnapshots:
         self.purged = 0
         self.capture_s = capture_s  # how long one capture takes (PrintWindow can take tens of ms)
         self.refreshed: list[list[int]] = []  # each sync's background request
+        self.cleared = 0  # clear() calls (every preview freed)
 
     def capture(self, h):
         self.captured.append(h)
@@ -440,4 +441,4 @@ class FakeSnapshots:
         self.purged += 1
 
     def clear(self):
-        pass
+        self.cleared += 1

@@ -127,5 +127,63 @@ class FastQueries(unittest.TestCase):
         self.assertEqual(results, [True] * 200)
 
 
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PRELOAD_CHILD = r'''
+import ctypes, sys, time
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[1])
+from src import native as N
+module_handle = N._f(N.kernel32, "GetModuleHandleW", ctypes.c_void_p, ctypes.c_wchar_p)
+if sys.argv[2] == "load":
+    before = bool(module_handle("dcomp.dll"))
+    t = time.perf_counter()
+    N.preload("dcomp.dll", "no such file here.dll")
+    took = time.perf_counter() - t
+    end = time.monotonic() + 10
+    while not module_handle("dcomp.dll") and time.monotonic() < end:
+        time.sleep(0.005)
+    after = bool(module_handle("dcomp.dll"))
+    try:
+        N._load("no such file here.dll")
+        missing = "loaded"
+    except OSError:
+        missing = "OSError"
+    print(before, after, took < 0.5, missing, N._load("dcomp.dll")._handle == module_handle("dcomp.dll"))
+else:
+    from src import app
+    sys.modules["src.gui"] = None  # (the app never gets past its first UI import: nothing starts)
+    seen = []
+    def fake(*names):
+        seen.append((names, sorted(m for m in ("src.gpu", "src.tray", "src.strings") if m in sys.modules)))
+        raise KeyboardInterrupt
+    N.preload = fake
+    try:
+        app.main([])
+    except (KeyboardInterrupt, ImportError):
+        pass
+    print(seen)
+'''
+
+
+class Preload(unittest.TestCase):
+    """native.preload: the slide's GPU DLLs load on a thread while the app imports its UI."""
+
+    def child(self, mode: str) -> str:
+        import subprocess
+        import sys
+        out = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", _PRELOAD_CHILD, _REPO, mode],
+                             capture_output=True, text=True, timeout=60, creationflags=0x08000000)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout.strip()
+
+    def test_it_loads_on_a_thread_and_a_later_load_gets_that_dll(self):
+        # (not loaded before; preload returns at once; a missing DLL raises nothing there and still
+        # fails in _load; _load gets the module the thread loaded)
+        self.assertEqual(self.child("load"), "False True True OSError True")
+
+    def test_the_app_preloads_before_its_ui_imports(self):
+        self.assertEqual(self.child("main"), "[(('d3d11.dll', 'dcomp.dll', 'dxgi.dll'), [])]")
+
+
 if __name__ == "__main__":
     unittest.main()

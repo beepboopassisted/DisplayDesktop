@@ -290,13 +290,14 @@ class TrayApp(G.Window):
         if not go_on:
             self._recover_crashed_run()
             raise StartCancelled()
-        startup.refresh()  # an enabled but outdated startup entry is rewritten for this copy
+        startup.refresh()  # older Run value → Startup shortcut; an outdated shortcut is rewritten for this copy
         done = shortcut.ensure()  # Start menu entry: added if missing, rewritten if outdated
         if done:
             console.log(f"Start menu entry {done}.")
         self.mgr = DesktopManager(win=window_api())
         self.mgr.log = console.log
         self.mgr.restore_apps = bool(settings.get("RestoreApps"))  # (Restore Applications On Restart)
+        self.mgr.set_previews(not settings.get("NoPreviews"))  # (Disable Overview previews: before the first sync)
         # From here on windows can be hidden (the first sync puts windows back on their desktops), and
         # main() only knows this app once __init__ returns: a failure must show them again itself
         try:
@@ -617,6 +618,7 @@ class TrayApp(G.Window):
     def _apply_options(self) -> None:
         """The settings that act at once follow the stored ones (after a folder move)."""
         for step in (lambda: setattr(self.mgr, "restore_apps", bool(settings.get("RestoreApps"))),
+                     lambda: self.mgr.set_previews(not settings.get("NoPreviews")),
                      lambda: gpu.set_enabled(settings.get("UseGpu")),
                      lambda: shortcut.set_enabled(settings.get("StartMenu")),
                      lambda: console.is_open() != settings.get("ShowConsole")
@@ -773,7 +775,8 @@ class TrayApp(G.Window):
         elif cmd == ID_SETTINGS:
             _ui("SettingsWindow").show(self._icon, on_recovery=lambda: self.open_recovery(forced=True, can_quit=False),
                                        on_folder=self.folder_changed,
-                                       on_encrypt=self.set_encryption, on_remember=self.set_remember)
+                                       on_encrypt=self.set_encryption, on_remember=self.set_remember,
+                                       on_previews=self.mgr.set_previews)
         elif cmd == ID_CONSOLE:  # no menu item (it is in Settings): a test-mode command for live tests
             want = not console.is_open()
             if console.set_enabled(want) != want:

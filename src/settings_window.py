@@ -59,9 +59,10 @@ IN_BOX = (ID_FOLDER_LABEL, ID_FOLDER, ID_BROWSE, ID_DEFAULT, ID_APPLY, ID_ENCRYP
           ID_KEY_REVERT, ID_KEY_APPLY, ID_REMEMBER, ID_CONSOLE, ID_RECOVERY)
 ES_PASSWORD, EM_SETPASSWORDCHAR, PASSWORD_CHAR = 0x0020, 0x00CC, 0x25CF  # ● like every login box
 EYE_SHOWN, EYE_HIDDEN = "", ""  # Segoe Fluent Icons / MDL2: View (eye), Hide (eye with a slash)
-OPTION_ROWS = 4  # checkboxes above the box: Start With Windows, Add To Start Menu, Use GPU Acceleration,
-# Restore Applications On Restart
+OPTION_ROWS = 5  # checkboxes above the box: Start With Windows, Add To Start Menu, Restore Applications On
+# Restart, Use GPU Acceleration, Disable Overview previews (less compute)
 ID_RESTORE_APPS = 123
+ID_NO_PREVIEWS = 124  # Disable Overview previews (less compute)
 ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, EN_CHANGE = 0x0080, 0x0200, 0x0300
 MB_YESNO, MB_ICONQUESTION, MB_DEFBUTTON2, IDYES = 0x4, 0x20, 0x100, 6
 MB_YESNOCANCEL, MB_DEFBUTTON3, IDNO = 0x3, 0x200, 7
@@ -231,12 +232,14 @@ class SettingsWindow(G.Window):
     def show(cls, icon: int = 0, on_recovery: Callable[[], None] | None = None,
              on_folder: Callable[[str], None] | None = None,
              on_encrypt: Callable[[str | None, bool, bool], bool] | None = None,
-             on_remember: Callable[[bool], bool] | None = None) -> "SettingsWindow | None":
+             on_remember: Callable[[bool], bool] | None = None,
+             on_previews: Callable[[bool], None] | None = None) -> "SettingsWindow | None":
         """Opens the dialog, or brings the open one to the front. on_recovery runs for the Recovery
         button (opens the Recovery dialog); on_encrypt(key, on, remember) turns Encrypt Settings
         on (with that key, also a new key) or off and returns whether it worked; on_remember(on)
-        remembers the key on this PC or forgets it and returns the resulting state. None (nothing
-        opens) while Windows reports no display."""
+        remembers the key on this PC or forgets it and returns the resulting state; on_previews(on)
+        turns window previews on or off (Disable Overview previews). None (nothing opens) while
+        Windows reports no display."""
         if cls.current is not None and cls.current.hwnd:
             G.ShowWindow(cls.current.hwnd, N.SW_SHOW)
             G.SetForegroundWindow(cls.current.hwnd)
@@ -244,7 +247,7 @@ class SettingsWindow(G.Window):
         scr = N.pick_screen(N.screens(), N.cursor_pos())
         if scr is None:
             return None
-        cls.current = cls(icon, on_recovery, scr, on_folder, on_encrypt, on_remember)
+        cls.current = cls(icon, on_recovery, scr, on_folder, on_encrypt, on_remember, on_previews)
         return cls.current
 
     @classmethod
@@ -253,7 +256,8 @@ class SettingsWindow(G.Window):
             cls.current.destroy()
 
     def __init__(self, icon: int = 0, on_recovery: Callable[[], None] | None = None, scr: N.Screen | None = None,
-                 on_folder: Callable[[str], None] | None = None, on_encrypt=None, on_remember=None):
+                 on_folder: Callable[[str], None] | None = None, on_encrypt=None, on_remember=None,
+                 on_previews: Callable[[bool], None] | None = None):
         super().__init__()
         scr = scr or N.pick_screen(N.screens(), N.cursor_pos())
         if scr is None:
@@ -261,6 +265,7 @@ class SettingsWindow(G.Window):
         self._on_recovery = on_recovery
         self._icon = icon
         self._on_encrypt, self._on_remember = on_encrypt, on_remember
+        self._on_previews = on_previews  # previews on/off for the manager (Disable Overview previews)
         self._key_shown = False  # the key box shows its text (the eye button), else dots
         self._closing = False  # close() is asking whether to apply the key typed
         self._box_key = ""  # the key in use the box was last set to show (refresh_options)
@@ -277,6 +282,7 @@ class SettingsWindow(G.Window):
             ID_START_MENU: self._set_start_menu,
             ID_CONSOLE: self._set_console,
             ID_GPU: self._set_gpu,
+            ID_NO_PREVIEWS: self._set_no_previews,
             ID_RESTORE_APPS: self._set_restore_apps,
             ID_ADVANCED: self._set_advanced,
             ID_ENCRYPT: self._set_encrypt,
@@ -337,9 +343,10 @@ class SettingsWindow(G.Window):
             menu_on = settings.get("StartMenu")
             rows = [(ID_STARTUP, "settings.startup", startup.is_enabled(), disabled),
                     (ID_START_MENU, "settings.startMenu", menu_on, disabled | (0 if menu_on else no_shortcut)),
+                    (ID_RESTORE_APPS, "settings.restoreApps", settings.get("RestoreApps"), 0),
                     (ID_GPU, "settings.gpu", settings.get("UseGpu") and self._has_gpu,
                      0 if self._has_gpu else WS_DISABLED),
-                    (ID_RESTORE_APPS, "settings.restoreApps", settings.get("RestoreApps"), 0)]
+                    (ID_NO_PREVIEWS, "settings.noPreviews", settings.get("NoPreviews"), 0)]
             for i, (cid, key, on, off) in enumerate(rows):
                 self._add("BUTTON", L.t(key), WS_TABSTOP | BS_AUTOCHECKBOX | off, cid,
                           s(16), s(42 + 28 * i), cw - s(32), s(24), font)
@@ -630,6 +637,7 @@ class SettingsWindow(G.Window):
         have been chosen)."""
         for cid, on in ((ID_START_MENU, settings.get("StartMenu")), (ID_CONSOLE, console.is_open()),
                         (ID_GPU, settings.get("UseGpu") and self._has_gpu),
+                        (ID_NO_PREVIEWS, settings.get("NoPreviews")),
                         (ID_RESTORE_APPS, settings.get("RestoreApps"))):
             if cid in self._controls:
                 G.SendMessageW(self._controls[cid], BM_SETCHECK, 1 if on else 0, None)
@@ -647,7 +655,12 @@ class SettingsWindow(G.Window):
 
     @staticmethod
     def _set_startup(on: bool) -> bool:
-        now = startup.set_enabled(on)
+        try:
+            now = startup.set_enabled(on)
+        except OSError as exc:  # (the Startup folder shortcut could not be written or deleted)
+            console.log(f"Start With Windows: {exc}")
+            now = startup.is_enabled()
+            G.message_box(L.t("msg.startupFail"), MB_OK | MB_ICONWARNING)
         console.log(f"Start With Windows: {'on' if now else 'off'}.")
         return now
 
@@ -663,6 +676,15 @@ class SettingsWindow(G.Window):
         settings.set("UseGpu", on)
         gpu.set_enabled(on)
         console.log(f"Use GPU Acceleration: {'on' if on else 'off'} (animations run on {gpu.describe()}).")
+        return on
+
+    def _set_no_previews(self, on: bool) -> bool:
+        """Disable Overview previews: no window captures (the tray's manager, at once); the Overview
+        shows windows on other desktops as icons."""
+        settings.set("NoPreviews", on)
+        if self._on_previews is not None:
+            self._on_previews(not on)
+        console.log(f"Disable Overview Previews: {'on' if on else 'off'}.")
         return on
 
     @staticmethod

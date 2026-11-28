@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from src import paths, settings
@@ -67,6 +68,59 @@ class Settings(unittest.TestCase):
         with open(self.file, "w", encoding="utf-8") as fh:
             fh.write('{"RestoreApps":"yes"}')
         self.assertFalse(settings.get("RestoreApps"), "a wrong type reads as the default")
+
+    def test_no_previews_is_off_by_default_and_on_is_stored(self):
+        self.assertFalse(settings.get("NoPreviews"), "previews are on by default")
+        settings.set("NoPreviews", True)
+        self.assertEqual(self.read(), '{"NoPreviews":true,"Format":%d}' % paths.FORMAT)
+        self.assertTrue(settings.get("NoPreviews"))
+        settings.set("NoPreviews", False)
+        self.assertIsNone(self.read(), "off again: the default, no file")
+        with open(self.file, "w", encoding="utf-8") as fh:
+            fh.write('{"NoPreviews":1}')
+        self.assertFalse(settings.get("NoPreviews"), "a wrong type reads as the default")
+
+    def test_a_format_5_settings_file_reads_unchanged(self):
+        with open(self.file, "w", encoding="utf-8") as fh:
+            fh.write('{"UseGpu":false,"Format":5}')
+        self.assertEqual(paths.read_json(self.file), {"UseGpu": False})
+        self.assertFalse(settings.get("NoPreviews"))
+
+    def test_the_checkbox_turns_previews_off_and_on_at_once(self):
+        from src import settings_window as SW
+        from src import strings as L
+        told = []
+        dlg = SimpleNamespace(_on_previews=told.append)
+        with mock.patch.object(SW.console, "log") as log:
+            self.assertIs(SW.SettingsWindow._set_no_previews(dlg, True), True)
+            self.assertTrue(settings.get("NoPreviews"))
+            self.assertIs(SW.SettingsWindow._set_no_previews(dlg, False), False)
+        self.assertEqual(told, [False, True], "the manager: previews off, then on")
+        self.assertIsNone(self.read())
+        self.assertIn("Disable Overview Previews: off.", log.call_args.args[0])
+        self.assertEqual(L.t("settings.noPreviews"), "Disable Overview Previews (Less Compute)")
+        self.assertNotIn("\n", L.t("settings.noPreviews"), "one row like the other options")
+
+    def test_the_option_rows_order(self):
+        from src import settings_window as SW
+        self.assertEqual(SW.OPTION_ROWS, 5)
+        import inspect
+        src = inspect.getsource(SW.SettingsWindow.__init__)
+        keys = ["settings.startup", "settings.startMenu", "settings.restoreApps", "settings.gpu", "settings.noPreviews"]
+        at = [src.index(f'"{k}"') for k in keys]
+        self.assertEqual(at, sorted(at), "Start With Windows, Add To Start Menu, Restore Applications On Restart, "
+                                         "Use GPU Acceleration, Disable Overview previews")
+
+    def test_the_tray_applies_it_at_start_and_after_a_folder_move(self):
+        from src import tray as T
+        settings.set("NoPreviews", True)
+        mgr = SimpleNamespace(restore_apps=False, set_previews=mock.Mock())
+        with mock.patch.object(T.gpu, "set_enabled"), mock.patch.object(T.shortcut, "set_enabled"), \
+                mock.patch.object(T.console, "is_open", return_value=False):
+            T.TrayApp._apply_options(SimpleNamespace(mgr=mgr))
+        mgr.set_previews.assert_called_once_with(False)
+        src = __import__("inspect").getsource(T.TrayApp.__init__)
+        self.assertIn('self.mgr.set_previews(not settings.get("NoPreviews"))', src, "at start, before the first sync")
 
     def test_a_wrong_gpu_value_reads_as_the_default(self):
         for wrong in ('{"UseGpu":"yes"}', '{"UseGpu":1}'):

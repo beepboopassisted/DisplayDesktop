@@ -170,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         from . import cli
         return cli.run(argv[0])
 
+    N.preload("d3d11.dll", "dcomp.dll", "dxgi.dll")  # (the slide's GPU DLLs, beside the imports below)
     import threading
     from . import gui as G
     from . import strings as L

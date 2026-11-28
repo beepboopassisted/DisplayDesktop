@@ -178,28 +178,43 @@ def status() -> int:
         print("DisplayDesktop is not running.")
     v = sys.version_info
     print(f"Python {v.major}.{v.minor}.{v.micro}: {sys.executable}")
-    command = startup.startup_command()  # (once: it searches PATH)
-    print(f"App command: {command}")
-    s = startup.state(command)
+    print(f"App command: {startup.command_line()}")
+    s = startup.state()
     if s == "outdated":
-        print("Start with Windows: on, but the entry is outdated (it is updated the next time "
+        print("Start with Windows: on, but the shortcut is outdated (it is updated the next time "
               "DisplayDesktop starts, or now with 'enable-startup').")
+    elif s == "off" and startup.exists():
+        print("Start with Windows: off (turned off in Settings > Apps > Startup)")
     else:
         print(f"Start with Windows: {s}")
+    got = startup.link()
+    if got is not None:
+        print(f"Startup shortcut: {_opens(got['exe'], got['args'])}")
+    if startup.has_run_value():
+        print("An older startup entry (Run value) is there: it is moved to the shortcut the next time "
+              "DisplayDesktop starts.")
     return 0
+
+
+def _opens(exe: str, args: str) -> str:
+    return f"{exe} {args}" if args else exe
 
 
 def enable_startup() -> int:
     if not startup.can_manage():
         print("Not available in test mode.")
         return 1
-    if not startup.windowless():
-        print("Could not add the startup entry: this Python has no pythonw.exe (it would open a console "
-              "window at every sign-in).")
+    try:
+        want = startup.target()
+    except OSError:
+        print("Could not add the startup shortcut: no Python opens .pyw files here and this Python has no "
+              "pythonw.exe (it would open a console window at every sign-in).")
         return 1
-    command = startup.startup_command()  # (once: it searches PATH)
-    ok = startup.set_enabled(True, command) and startup.state(command) == "on"
-    print(f"Start with Windows: on ({command})" if ok else "Could not add the startup entry.")
+    try:
+        ok = startup.set_enabled(True, want) and startup.state(want) == "on"
+    except OSError:
+        ok = False
+    print(f"Start with Windows: on ({_opens(*want)})" if ok else "Could not add the startup shortcut.")
     return 0 if ok else 1
 
 
@@ -207,15 +222,26 @@ def disable_startup() -> int:
     if not startup.can_manage():
         print("Not available in test mode.")
         return 1
-    if not startup.is_enabled():
+    if not startup.exists() and not startup.has_run_value():
         print("Start with Windows was already off.")
         return 0
-    ok = not startup.set_enabled(False)
-    print("Start with Windows: off" if ok else "Could not remove the startup entry.")
+    try:
+        ok = not startup.set_enabled(False)
+    except OSError:
+        ok = False
+    print("Start with Windows: off" if ok else "Could not remove the startup shortcut.")
     return 0 if ok else 1
 
 
 def run(command: str) -> int:
+    # (-I ignores PYTHONIOENCODING/PYTHONUTF8: a redirected stdout uses the ANSI code page with
+    # "strict" or "surrogateescape", so a path character outside it is printed as "?", never an error)
+    for stream in (sys.stdout, sys.stderr):
+        if getattr(stream, "errors", "replace") not in ("replace", "backslashreplace"):
+            try:
+                stream.reconfigure(errors="replace")
+            except (AttributeError, ValueError, OSError):  # (not a TextIOWrapper, closed)
+                pass
     cmd = normalize(command)
     if cmd == "start":
         return start()
